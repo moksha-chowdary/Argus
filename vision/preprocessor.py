@@ -1,16 +1,11 @@
-"""
-ARGUS Vision Layer — Image Preprocessor
-Handles chart screenshot ingestion and normalization.
-"""
 import cv2
 import numpy as np
-from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
 
 @dataclass
-class PreprocessedImage:
+class ProcessedImage:
     original: np.ndarray
     gray: np.ndarray
     denoised: np.ndarray
@@ -21,66 +16,32 @@ class PreprocessedImage:
 
 
 class ImagePreprocessor:
-    """
-    Prepares chart screenshots for downstream CV analysis and OCR.
-    Pipeline: load → resize → denoise → sharpen → edge detect
-    """
+    TARGET_WIDTH = 1280
 
-    TARGET_WIDTH = 1280  # normalize to consistent width
-
-    def preprocess(self, source: str | np.ndarray) -> PreprocessedImage:
-        """
-        Accept a file path or an already-loaded numpy array.
-        Returns a PreprocessedImage with all intermediate stages.
-        """
+    def preprocess(self, source) -> ProcessedImage:
         filepath = None
-        if isinstance(source, (str, Path)):
-            filepath = str(source)
-            img = cv2.imread(filepath)
+        if isinstance(source, str):
+            filepath = source
+            img = cv2.imread(source)
             if img is None:
-                raise ValueError(f"Could not load image from {filepath}")
+                raise ValueError(f"Cannot load image: {source}")
         else:
             img = source.copy()
 
-        img = self._normalize_size(img)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        denoised = self._denoise(gray)
-        sharpened = self._sharpen(denoised)
-        edges = self._detect_edges(sharpened)
+        img    = self._resize(img)
+        gray   = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        den    = cv2.fastNlMeansDenoising(gray, h=10)
+        sharp  = cv2.filter2D(den, -1, np.array([[0,-1,0],[-1,5,-1],[0,-1,0]]))
+        edges  = cv2.Canny(sharp, 50, 150)
 
-        return PreprocessedImage(
-            original=img,
-            gray=gray,
-            denoised=denoised,
-            edges=edges,
-            width=img.shape[1],
-            height=img.shape[0],
-            filepath=filepath,
+        return ProcessedImage(
+            original=img, gray=gray, denoised=den, edges=edges,
+            width=img.shape[1], height=img.shape[0], filepath=filepath
         )
 
-    def _normalize_size(self, img: np.ndarray) -> np.ndarray:
+    def _resize(self, img):
         h, w = img.shape[:2]
         if w == self.TARGET_WIDTH:
             return img
         scale = self.TARGET_WIDTH / w
-        new_h = int(h * scale)
-        return cv2.resize(img, (self.TARGET_WIDTH, new_h), interpolation=cv2.INTER_LANCZOS4)
-
-    def _denoise(self, gray: np.ndarray) -> np.ndarray:
-        return cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
-
-    def _sharpen(self, gray: np.ndarray) -> np.ndarray:
-        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-        return cv2.filter2D(gray, -1, kernel)
-
-    def _detect_edges(self, gray: np.ndarray) -> np.ndarray:
-        return cv2.Canny(gray, threshold1=50, threshold2=150)
-
-    def save_debug_stages(self, processed: PreprocessedImage, out_dir: str = "/tmp/argus_debug"):
-        """Dump intermediate stages for debugging the vision pipeline."""
-        out = Path(out_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(out / "original.png"), processed.original)
-        cv2.imwrite(str(out / "gray.png"), processed.gray)
-        cv2.imwrite(str(out / "denoised.png"), processed.denoised)
-        cv2.imwrite(str(out / "edges.png"), processed.edges)
+        return cv2.resize(img, (self.TARGET_WIDTH, int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
