@@ -1,298 +1,278 @@
 """
-ARGUS V3 — Intelligence Brain
-Fuses chart analysis + news sentiment + memory → best possible signal.
-This is what makes ARGUS intelligent, not just a chart reader.
+ARGUS V4 — Intelligence Brain
+Fuses chart score + news score + memory score using rulebook weights.
+Outputs a final TradeSignal with entry, stop, target, position size.
 """
-from dataclasses import dataclass
+
+import json, math
+from dataclasses import dataclass, field
 from typing import Optional
-from config import CAPITAL, MAX_RISK_PCT, MAX_ALLOCATION, MIN_RR_RATIO, NEWS_WEIGHT
+from config import RULEBOOK_PATH, CAPITAL, MAX_RISK_PCT
 
 
 @dataclass
-class IntelligentSignal:
-    # Core signal
-    action: str              # BUY | SELL | WAIT
-    conviction: str          # high | moderate | low
-    risk: str                # low | moderate | high | very_high
-
-    # Position sizing (calculated for your ₹4L capital)
-    entry_price: Optional[float]
-    stop_price: Optional[float]
-    target_price: Optional[float]
-    quantity: Optional[int]
-    capital_required: Optional[float]
-    max_loss: Optional[float]
-    potential_gain: Optional[float]
-    rr_ratio: Optional[float]
-
-    # Intelligence layers
-    chart_score: float       # from vision layer
-    news_score: float        # from news sentiment
-    memory_score: float      # from past trades
-    combined_score: float    # final weighted score
-
-    # Reasoning
-    chart_reasons: list
-    news_reasons: list
-    memory_reasons: list
-    warnings: list
-    final_advice: str        # one clear sentence
-
-    # Trade ID for tracking
-    trade_id: str = ""
+class TradeSignal:
+    action:           str         # BUY / SELL / WAIT
+    conviction:       str         # high / medium / low
+    confidence:       int         # 0-100
+    chart_score:      float
+    news_score:       float
+    memory_score:     float
+    combined_score:   float
+    entry_price:      float       = 0.0
+    stop_price:       float       = 0.0
+    target_price:     float       = 0.0
+    risk_per_share:   float       = 0.0
+    quantity:         int         = 0
+    capital_required: float       = 0.0
+    max_loss:         float       = 0.0
+    rr_ratio:         str         = ""
+    grade:            str         = "B"
+    warnings:         list        = field(default_factory=list)
+    matched_rules:    list        = field(default_factory=list)
+    final_advice:     str         = ""
+    live_price:       float       = 0.0
+    live_change_pct:  float       = 0.0
 
 
-class IntelligenceBrain:
-    """
-    The core intelligence layer.
-    Takes outputs from all 3 sources and produces one unified signal.
-    """
+class ArgusBrain:
+    def __init__(self):
+        self._rulebook = self._load_rulebook()
 
-    def analyze(
+    def reload_rulebook(self):
+        self._rulebook = self._load_rulebook()
+
+    # ── Main entry point ──────────────────────────────────────────────────────
+
+    def generate_signal(
         self,
-        chart_summary,      # MarketSummary from vision
-        chart_signal,       # Signal from signal generator
-        news_sentiment,     # MarketSentiment from news
-        memory_store,       # MemoryStore instance
-        ticker: str = None,
-    ) -> IntelligentSignal:
+        chart_summary,          # MarketSummary from vision layer
+        news_sentiment,         # MarketSentiment (can be None)
+        memory_context: dict,   # from ArgusMemory.stock_accuracy()
+        live_price: dict = None, # from PriceTracker.get()
+        live_feed_on: bool = True,
+    ) -> TradeSignal:
 
-        import uuid
-        trade_id = str(uuid.uuid4())[:8]
-        ticker = ticker or chart_summary.ticker or "UNKNOWN"
+        w    = self._rulebook.get("scoring_weights", {})
+        cw   = float(w.get("chart_weight",  0.50))
+        nw   = float(w.get("news_weight",   0.25))
+        mw   = float(w.get("memory_weight", 0.25))
+        caps = self._rulebook.get("confidence_caps", {})
 
-        # ── Layer 1: Chart score ───────────────────────────────────────────────
-        chart_score = self._chart_score(chart_summary, chart_signal)
+        # ── 1. Chart score ────────────────────────────────────────────────────
+        chart_score, matched_rules, warnings = self._score_chart(chart_summary)
 
-        # ── Layer 2: News score ────────────────────────────────────────────────
-        news_score, news_reasons = self._news_score(ticker, news_sentiment)
+        # ── 2. News score ─────────────────────────────────────────────────────
+        news_score = 0.0
+        if news_sentiment and live_feed_on:
+            ns = news_sentiment.overall_score
+            # sector-specific override
+            ticker = (chart_summary.ticker or "").upper()
+            for sector, keywords in _SECTOR_TICKER_MAP.items():
+                if any(k in ticker for k in keywords):
+                    sec = news_sentiment.sectors.get(sector)
+                    if sec:
+                        ns = sec.score
+                    break
+            news_score = ns
 
-        # ── Layer 3: Memory score ──────────────────────────────────────────────
-        memory_score, memory_reasons = self._memory_score(ticker, memory_store)
+        # ── 3. Memory score ───────────────────────────────────────────────────
+        mem_score = 0.0
+        if memory_context and memory_context.get("samples", 0) >= 3:
+            wr        = memory_context["win_rate"]
+            mem_score = round((wr - 0.5) * 0.6, 3)
 
-        # ── Combine scores ─────────────────────────────────────────────────────
-        combined = self._combine(chart_score, news_score, memory_score)
+        # ── 4. Combined weighted score ────────────────────────────────────────
+        if live_feed_on:
+            combined = chart_score * cw + news_score * nw + mem_score * mw
+        else:
+            # Without live feed, rebalance weights to chart + memory only
+            total_w  = cw + mw
+            combined = (chart_score * cw + mem_score * mw) / total_w
 
-        # ── Final decision ─────────────────────────────────────────────────────
-        action, conviction = self._decide(combined, chart_summary, chart_signal)
+        # ── 5. Live price bonus ───────────────────────────────────────────────
+        live_chg = 0.0
+        live_px  = 0.0
+        if live_price and live_feed_on:
+            live_px  = live_price.get("price", 0)
+            live_chg = live_price.get("change_pct", 0)
+            bonus    = float(w.get("live_price_bonus", 0.05))
+            if live_chg > 1.0 and combined > 0:
+                combined += bonus
+            elif live_chg < -1.0 and combined < 0:
+                combined -= bonus
 
-        # ── Position sizing ────────────────────────────────────────────────────
-        entry, stop, target, qty, cap, loss, gain, rr = self._position_size(
-            chart_summary, chart_signal, action
+        # ── 6. Confidence ─────────────────────────────────────────────────────
+        max_conf = int(caps.get("max_confidence", 82))
+        conf     = int(min(max_conf, 50 + abs(combined) * 50))
+
+        # Apply penalties
+        if any("extended" in w.lower() for w in warnings):
+            conf -= int(caps.get("extended_stock_penalty", 15))
+        if any("support" in w.lower() for w in warnings):
+            conf -= int(caps.get("multiple_support_retest_penalty", 10))
+        if any("volume" in w.lower() for w in warnings):
+            conf -= int(caps.get("weak_volume_recovery_penalty", 12))
+
+        # Apply bonuses
+        if news_sentiment and news_sentiment.overall_signal == "bullish" and combined > 0:
+            conf += int(caps.get("sector_alignment_bonus", 6))
+        conf = max(30, min(max_conf, conf))
+
+        # ── 7. Action ─────────────────────────────────────────────────────────
+        if   combined >  0.15: action = "BUY"
+        elif combined < -0.15: action = "SELL"
+        else:                  action = "WAIT"
+
+        conviction = "high" if conf >= 70 else ("medium" if conf >= 55 else "low")
+        grade      = self._grade(conf, combined)
+
+        # ── 8. Position sizing ────────────────────────────────────────────────
+        entry = stop = target = 0.0
+        qty   = cap_req = max_loss = 0
+        rr    = ""
+
+        if action != "WAIT" and chart_summary:
+            entry  = float(chart_summary.support  or live_px or 0)
+            stop   = float(chart_summary.support  or live_px or 0) * 0.97
+            target = float(chart_summary.resistance or live_px or 0) * 1.03
+
+            # Prefer chart-extracted values
+            if action == "BUY":
+                entry  = live_px or entry
+                stop   = entry * 0.97
+                target = entry * 1.05
+            else:
+                entry  = live_px or entry
+                stop   = entry * 1.03
+                target = entry * 0.95
+
+            risk_ps  = abs(entry - stop)
+            if risk_ps > 0:
+                max_risk = CAPITAL * MAX_RISK_PCT
+                qty      = max(1, int(max_risk / risk_ps))
+                cap_req  = round(qty * entry, 2)
+                max_loss = round(qty * risk_ps, 2)
+                reward   = abs(target - entry) * qty
+                rr_num   = round(reward / max_loss, 1) if max_loss else 0
+                rr       = f"1:{rr_num}"
+
+        advice = self._advice(action, conviction, conf, chart_summary, news_sentiment, live_feed_on)
+
+        return TradeSignal(
+            action=action, conviction=conviction, confidence=conf,
+            chart_score=round(chart_score, 3), news_score=round(news_score, 3),
+            memory_score=round(mem_score, 3), combined_score=round(combined, 3),
+            entry_price=round(entry, 2), stop_price=round(stop, 2),
+            target_price=round(target, 2), risk_per_share=round(abs(entry-stop), 2),
+            quantity=qty, capital_required=cap_req, max_loss=max_loss,
+            rr_ratio=rr, grade=grade, warnings=warnings,
+            matched_rules=matched_rules, final_advice=advice,
+            live_price=live_px, live_change_pct=live_chg,
         )
 
-        # ── Risk assessment ────────────────────────────────────────────────────
-        risk = self._risk(chart_summary, chart_signal, news_score, action)
+    # ── Rulebook scoring ──────────────────────────────────────────────────────
 
-        # ── Warnings ──────────────────────────────────────────────────────────
-        warnings = self._warnings(
-            chart_summary, chart_signal, news_score, memory_score, rr, action
-        )
+    def _score_chart(self, summary) -> tuple:
+        if not summary:
+            return 0.0, [], []
 
-        # ── Final advice ───────────────────────────────────────────────────────
-        advice = self._advice(action, conviction, entry, stop, target, qty, rr, ticker)
+        rules    = self._rulebook.get("rules", [])
+        score    = 0.0
+        matched  = []
+        warnings = []
 
-        return IntelligentSignal(
-            action=action,
-            conviction=conviction,
-            risk=risk,
-            entry_price=entry,
-            stop_price=stop,
-            target_price=target,
-            quantity=qty,
-            capital_required=cap,
-            max_loss=loss,
-            potential_gain=gain,
-            rr_ratio=rr,
-            chart_score=chart_score,
-            news_score=news_score,
-            memory_score=memory_score,
-            combined_score=combined,
-            chart_reasons=chart_signal.reasons if chart_signal else [],
-            news_reasons=news_reasons,
-            memory_reasons=memory_reasons,
-            warnings=warnings,
-            final_advice=advice,
-            trade_id=trade_id,
-        )
+        trend = (summary.trend or "").lower()
+        vol   = (summary.volume or "").lower()
+        pat   = (summary.pattern or "").lower()
+        mom   = (summary.momentum or "").lower()
 
-    # ── Scoring ───────────────────────────────────────────────────────────────
+        # Rule 1/2 — MA alignment (inferred from trend strength)
+        if "bullish" in trend:
+            score += 0.20
+            matched.append("Bullish trend")
+        elif "bearish" in trend:
+            score -= 0.20
+            matched.append("Bearish trend")
 
-    def _chart_score(self, summary, signal) -> float:
-        """Convert chart signal to -1.0 to +1.0 score."""
-        base = {"BUY": 0.6, "SELL": -0.6, "WAIT": 0.0}.get(signal.action, 0.0)
-        mult = {"high": 1.0, "moderate": 0.7, "low": 0.4}.get(signal.conviction, 0.5)
-        return round(base * mult, 2)
+        # Rule 3 — lower high structure
+        if "lower high" in pat or "bearish channel" in pat:
+            score -= 0.30
+            matched.append("Rule 3: Lower high structure — default bearish")
 
-    def _news_score(self, ticker: str, sentiment) -> tuple[float, list]:
-        """Get news sentiment score for this ticker's sector."""
-        reasons = []
-        if sentiment is None:
-            return 0.0, ["News data unavailable."]
+        # Rule 5 — rejection candle
+        if "rejection" in pat or "wick" in pat:
+            score += 0.15 if "bullish" in pat else -0.15
+            matched.append("Rule 5: Rejection candle")
 
-        # Overall market
-        overall = sentiment.overall_score
-        reasons.append(f"Market sentiment: {sentiment.overall_signal} ({overall:+.2f})")
+        # Rule 6 — giant candle
+        if "giant" in pat or "breakout" in pat:
+            score += 0.18 if "bullish" in pat else -0.18
+            matched.append("Rule 6: Giant candle momentum")
 
-        # Sector-specific
-        from news.sentiment import SentimentAnalyzer
-        analyzer = SentimentAnalyzer()
-        stock_signal, stock_score = analyzer.get_stock_sentiment(ticker, sentiment)
+        # Rule 7 — lilliput
+        if "lilliput" in pat or "contraction" in pat or "squeeze" in pat:
+            matched.append("Rule 7: Volatility contraction — watch for breakout")
 
-        if stock_signal != "neutral":
-            reasons.append(f"Sector sentiment for {ticker}: {stock_signal} ({stock_score:+.2f})")
+        # Rule 8 — breakdown retest
+        if "breakdown" in pat and ("retest" in pat or "weak" in vol):
+            score -= 0.28
+            matched.append("Rule 8: Breakdown + weak retest — strong short")
 
-        # Top headlines relevant to this ticker
-        ticker_lower = ticker.lower()
-        for headline in sentiment.top_bullish[:2]:
-            if ticker_lower in headline.lower() or any(
-                kw in headline.lower() for kw in [ticker_lower[:4]]
-            ):
-                reasons.append(f"Bullish news: {headline[:80]}")
+        # Rule 9 — exhaustion warning
+        if "exhaustion" in pat or ("bearish" in trend and "oversold" in (summary.rsi_state or "")):
+            warnings.append("Exhaustion possible — rule 9 applies")
+            score += 0.10
 
-        # Combined score: 70% sector, 30% overall
-        combined = round(stock_score * 0.7 + overall * 0.3, 2)
-        return combined, reasons
+        # Rule 10 — extended stock penalty
+        if summary.strength and "strong" in str(summary.strength).lower():
+            if "overbought" in (summary.rsi_state or "").lower():
+                warnings.append("Extended stock — rule 10 penalty applied")
+                score -= 0.15
 
-    def _memory_score(self, ticker: str, memory_store) -> tuple[float, list]:
-        """Score based on past trade performance for this ticker."""
-        reasons = []
-        history = memory_store.get_ticker_history(ticker)
+        # Volume confirmation
+        if "strong" in vol or "high" in vol:
+            score *= 1.15
+            matched.append("Volume confirmation")
+        elif "weak" in vol or "low" in vol:
+            score *= 0.85
+            warnings.append("Weak volume — reduce confidence")
 
-        if history.get("trades", 0) == 0:
-            return 0.0, [f"No previous trades for {ticker} — no memory bias."]
+        return round(max(-1.0, min(1.0, score)), 3), matched, warnings
 
-        win_rate = history.get("win_rate", 50.0)
-        total = history.get("trades", 0)
+    def _grade(self, conf: int, score: float) -> str:
+        if conf >= 75 and abs(score) > 0.25: return "A+"
+        if conf >= 65 and abs(score) > 0.18: return "A"
+        if conf >= 55 and abs(score) > 0.10: return "B+"
+        if conf >= 45:                        return "B"
+        return "C"
 
-        # Convert win rate to score (-1 to +1)
-        score = round((win_rate - 50) / 50, 2)  # 100% wins = +1.0, 0% wins = -1.0
-
-        reasons.append(
-            f"Past {ticker} trades: {total} total, {win_rate:.0f}% win rate"
-        )
-        reasons.append(
-            f"Last signal: {history.get('last_signal')} → {history.get('last_outcome')}"
-        )
-
-        # Recent accuracy
-        accuracy = memory_store.get_signal_accuracy()
-        buy_acc = accuracy.get("BUY", {}).get("accuracy", 0)
-        sell_acc = accuracy.get("SELL", {}).get("accuracy", 0)
-        if buy_acc or sell_acc:
-            reasons.append(f"Overall accuracy — BUY: {buy_acc:.0f}%  SELL: {sell_acc:.0f}%")
-
-        return score, reasons
-
-    def _combine(self, chart: float, news: float, memory: float) -> float:
-        """Weighted combination of all three scores."""
-        # Chart is most important (60%), news (25%), memory (15%)
-        return round(chart * 0.60 + news * NEWS_WEIGHT + memory * 0.15, 2)
-
-    # ── Decision ──────────────────────────────────────────────────────────────
-
-    def _decide(self, combined: float, summary, signal) -> tuple[str, str]:
-        # If chart says WAIT and combined score is ambiguous, respect it
-        if signal.action == "WAIT" and abs(combined) < 0.3:
-            return "WAIT", "high"
-        if combined >= 0.4:
-            return "BUY", "high" if combined >= 0.6 else "moderate"
-        if combined <= -0.4:
-            return "SELL", "high" if combined <= -0.6 else "moderate"
-        if combined >= 0.2:
-            return "BUY", "low"
-        if combined <= -0.2:
-            return "SELL", "low"
-        return "WAIT", "high"
-
-    # ── Position sizing ────────────────────────────────────────────────────────
-
-    def _position_size(self, summary, signal, action):
-        if action == "WAIT" or not summary.support or not summary.resistance:
-            return None, None, None, None, None, None, None, None
-
-        sup = summary.support
-        res = summary.resistance
-        if sup >= res:
-            return None, None, None, None, None, None, None, None
-
-        zone = res - sup
-        if action == "BUY":
-            entry  = round(sup + zone * 0.05, 2)
-            stop   = round(sup - zone * 0.10, 2)
-            target = round(res - zone * 0.02, 2)
-        else:  # SELL
-            entry  = round(res - zone * 0.05, 2)
-            stop   = round(res + zone * 0.10, 2)
-            target = round(sup + zone * 0.02, 2)
-
-        risk_per_share = abs(entry - stop)
-        if risk_per_share == 0:
-            return entry, stop, target, None, None, None, None, None
-
-        max_risk = CAPITAL * MAX_RISK_PCT
-        qty = int(max_risk / risk_per_share)
-        if qty == 0:
-            qty = 1
-
-        cap_required = round(qty * entry, 2)
-        # Don't exceed max allocation
-        if cap_required > CAPITAL * MAX_ALLOCATION:
-            qty = int((CAPITAL * MAX_ALLOCATION) / entry)
-            cap_required = round(qty * entry, 2)
-
-        max_loss     = round(qty * risk_per_share, 2)
-        potential    = round(qty * abs(target - entry), 2)
-        rr           = round(abs(target - entry) / risk_per_share, 2) if risk_per_share else None
-
-        return entry, stop, target, qty, cap_required, max_loss, potential, rr
-
-    # ── Risk ──────────────────────────────────────────────────────────────────
-
-    def _risk(self, summary, signal, news_score, action) -> str:
-        if summary.volatility == "high":                            return "very_high"
-        if summary.rsi_state == "overbought" and action == "BUY":  return "high"
-        if summary.rsi_state == "oversold" and action == "SELL":   return "high"
-        if abs(news_score) > 0.6:                                  return "moderate"
-        if summary.volatility == "compressed":                     return "moderate"
-        return "low"
-
-    # ── Warnings ──────────────────────────────────────────────────────────────
-
-    def _warnings(self, summary, signal, news_score, memory_score, rr, action) -> list:
-        w = []
-        if summary.confidence < 0.35:
-            w.append("Low chart extraction confidence — verify manually before trading.")
-        if rr and rr < MIN_RR_RATIO:
-            w.append(f"R/R ratio {rr:.1f} is below minimum {MIN_RR_RATIO} — not ideal.")
-        if summary.rsi_state == "overbought" and action == "BUY":
-            w.append("RSI overbought — chasing longs is risky here.")
-        if summary.rsi_state == "oversold" and action == "SELL":
-            w.append("RSI oversold — shorting here is dangerous.")
-        if summary.volatility == "high":
-            w.append("High volatility — use smaller position size than suggested.")
-        if summary.volume == "decreasing" and action != "WAIT":
-            w.append("Volume declining — trend lacks confirmation.")
-        if news_score < -0.3 and action == "BUY":
-            w.append("News sentiment bearish — headwind against long position.")
-        if news_score > 0.3 and action == "SELL":
-            w.append("News sentiment bullish — headwind against short position.")
-        if memory_score < -0.3:
-            w.append("Poor historical accuracy on this stock — trade smaller.")
-        if not w:
-            w.append("No major warnings. Still — always use a stop loss.")
-        return w
-
-    # ── Final advice ──────────────────────────────────────────────────────────
-
-    def _advice(self, action, conviction, entry, stop, target, qty, rr, ticker) -> str:
+    def _advice(self, action, conviction, conf, summary, news, live_feed_on) -> str:
+        parts = []
         if action == "WAIT":
-            return f"WAIT — no high-probability setup on {ticker} right now. Preserve capital."
-        direction = "BUY" if action == "BUY" else "SELL/SHORT"
-        if entry and stop and target and qty:
-            return (
-                f"{direction} {ticker}: {qty} shares near ₹{entry:.2f} | "
-                f"Stop ₹{stop:.2f} | Target ₹{target:.2f} | "
-                f"R/R {rr:.1f}x | Max loss ₹{int(qty * abs(entry - stop))}"
-            )
-        return f"{direction} {ticker} — confirm entry with price action. Use stop loss."
+            parts.append("No clean edge. Wait for breakout or breakdown confirmation.")
+        elif conviction == "high":
+            parts.append(f"Strong {action} setup. Execute with defined stop.")
+        else:
+            parts.append(f"Weak {action} signal. Reduce position size.")
+        if not live_feed_on:
+            parts.append("[Live feed OFF — no real-time price or news context]")
+        return " ".join(parts)
+
+    def _load_rulebook(self) -> dict:
+        try:
+            with open(RULEBOOK_PATH) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+
+# Sector → ticker fragment mapping for news alignment
+_SECTOR_TICKER_MAP = {
+    "BANKING": ["BANK", "HDFC", "ICICI", "AXIS", "KOTAK"],
+    "PHARMA":  ["PHARMA", "SUN", "CIPLA", "DIVI"],
+    "IT":      ["INFY", "TCS", "WIPRO", "HCL"],
+    "AUTO":    ["TATA", "TVS", "MARUTI", "BAJAJ"],
+    "ENERGY":  ["RELIANCE", "ADANI", "ONGC"],
+    "NBFC":    ["BAJFIN", "MUTHOOT", "CHOLA"],
+}

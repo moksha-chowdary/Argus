@@ -1,57 +1,60 @@
 """
-ARGUS V3 — Central Configuration
-Edit this file to customize your setup.
+ARGUS V4 — Central Config
+Edit this file to change behaviour without touching any other code.
 """
-from pathlib import Path
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-ROOT        = Path(__file__).parent
-DATA_DIR    = ROOT / "data"
-TRADES_DIR  = DATA_DIR / "trades"
-CACHE_DIR   = DATA_DIR / "news_cache"
-MEMORY_DIR  = DATA_DIR / "memory"
+import os
 
-for d in [DATA_DIR, TRADES_DIR, CACHE_DIR, MEMORY_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
+# ─── Paths ────────────────────────────────────────────────────────────────────
+BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
+RULEBOOK_PATH = os.path.join(BASE_DIR, "data", "rulebook.json")
+MEMORY_DIR    = os.path.join(BASE_DIR, "data", "memory")
+LOG_PATH      = os.path.join(BASE_DIR, "data", "trade_log.json")
+STATE_PATH    = os.path.join(BASE_DIR, "data", "state.json")   # persists live_feed toggle
 
-# ── Ollama ────────────────────────────────────────────────────────────────────
-OLLAMA_URL   = "http://localhost:11434"
-OLLAMA_MODEL = "gemma4:latest"
+# ─── Ollama ───────────────────────────────────────────────────────────────────
+OLLAMA_URL    = "http://localhost:11434"
+OLLAMA_MODEL  = "gemma4:latest"
+MAX_TOKENS    = 500
+CTX_WINDOW    = 2048
+TEMPERATURE   = 0.3
 
-# ── Trading ───────────────────────────────────────────────────────────────────
-CAPITAL          = 400000   # ₹4,00,000
-MAX_RISK_PCT     = 0.01     # 1% per trade = ₹4,000
-MAX_ALLOCATION   = 0.30     # max 30% capital in one stock
+# ─── Capital ──────────────────────────────────────────────────────────────────
+CAPITAL       = 400_000
+MAX_RISK_PCT  = 0.01          # 1 % per trade = ₹4,000
 
-# ── News ──────────────────────────────────────────────────────────────────────
-NEWS_CACHE_HOURS = 2        # re-fetch after 2 hours
-NEWS_FEEDS = [
-    # Moneycontrol
-    "https://www.moneycontrol.com/rss/latestnews.xml",
-    "https://www.moneycontrol.com/rss/marketreports.xml",
-    # Economic Times
-    "https://economictimes.indiatimes.com/markets/stocks/rss.cms",
-    "https://economictimes.indiatimes.com/markets/rss.cms",
-    # Business Standard
-    "https://www.business-standard.com/rss/markets-106.rss",
-    # Mint
-    "https://www.livemint.com/rss/markets",
+# ─── Live feed (can be toggled at runtime via 'livefeed on/off') ──────────────
+LIVE_FEED_DEFAULT = True      # starts ON — user can toggle
+PRICE_REFRESH_SEC = 30        # how often to refresh live prices
+NEWS_REFRESH_MIN  = 30        # how often to re-fetch news (minutes)
+
+# ─── NSE tickers to watch (auto-fetched on startup if live feed is ON) ────────
+WATCHLIST = [
+    "RELIANCE.NS", "ICICIBANK.NS", "HDFCBANK.NS", "AXISBANK.NS",
+    "BAJFINANCE.NS", "TATAMOTORS.NS", "WIPRO.NS", "SUNPHARMA.NS",
+    "ADANIENT.NS", "KOTAKBANK.NS", "INFY.NS", "TCS.NS",
 ]
 
-# ── NSE Sectors ───────────────────────────────────────────────────────────────
-SECTORS = {
-    "banking":    ["HDFCBANK","ICICIBANK","AXISBANK","SBIN","KOTAKBANK","INDUSINDBK","BANDHANBNK"],
-    "pharma":     ["SUNPHARMA","DRREDDY","CIPLA","DIVISLAB","APOLLOHOSP","TORNTPHARM"],
-    "it":         ["TCS","INFY","WIPRO","HCLTECH","TECHM","LTIM","PERSISTENT"],
-    "auto":       ["TATAMOTORS","MARUTI","BAJAJ-AUTO","HEROMOTOCO","TVSMOTOR","EICHERMOT"],
-    "energy":     ["RELIANCE","ONGC","NTPC","POWERGRID","BPCL","IOC"],
-    "metals":     ["TATASTEEL","JSWSTEEL","HINDALCO","COALINDIA","VEDL","NMDC"],
-    "fmcg":       ["HINDUNILVR","ITC","NESTLEIND","BRITANNIA","DABUR","MARICO"],
-    "realty":     ["DLF","GODREJPROP","OBEROIRLTY","PRESTIGE","BRIGADE"],
-    "finance":    ["BAJFINANCE","BAJAJFINSV","MUTHOOTFIN","CHOLAFIN","M&MFIN"],
-}
+# ─── NIFTY / BankNifty indices ────────────────────────────────────────────────
+NIFTY_TICKER     = "^NSEI"
+BANKNIFTY_TICKER = "^NSEBANK"
 
-# ── Signal thresholds ─────────────────────────────────────────────────────────
-MIN_RR_RATIO     = 1.5      # minimum risk/reward to recommend entry
-MIN_CONFIDENCE   = 0.35     # minimum vision confidence to trust signal
-NEWS_WEIGHT      = 0.25     # how much news sentiment influences final signal
+# ─── News sources (RSS, no key needed) ───────────────────────────────────────
+NEWS_FEEDS = [
+    "https://www.moneycontrol.com/rss/MCtopnews.xml",
+    "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+    "https://www.business-standard.com/rss/markets-106.rss",
+]
+
+# ─── Tesseract path (Windows) ─────────────────────────────────────────────────
+TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+# ─── Display ──────────────────────────────────────────────────────────────────
+BANNER = r"""
+    ___    ____  ______  __  _______
+   /   |  / __ \/ ____/ / / / / ___/
+  / /| | / /_/ / / __  / / / /\__ \ 
+ / ___ |/ _, _/ /_/ / / /_/ /___/ / 
+/_/  |_/_/ |_|\____/  \____//____/  
+              V4  —  NSE Intelligence
+"""

@@ -1,227 +1,169 @@
 """
-ARGUS V3 — Memory Store
-Persistent memory using ChromaDB.
-Stores every analysis + outcome so ARGUS gets smarter over time.
+ARGUS V4 — Persistent Memory (ChromaDB)
+Stores every analysis + outcome. Enables per-stock learning.
 """
-import json
-import uuid
+
+import json, uuid, os
 from datetime import datetime
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from typing import Optional
-from pathlib import Path
-from config import MEMORY_DIR
+import chromadb
+from config import MEMORY_DIR, RULEBOOK_PATH
 
 
 @dataclass
-class TradeMemory:
-    """One complete trade record — prediction + outcome."""
-    id: str
-    date: str
-    ticker: str
-    timeframe: str
-    signal: str               # BUY | SELL | WAIT
-    conviction: str
-    entry_price: Optional[float]
-    stop_price: Optional[float]
-    target_price: Optional[float]
-    chart_summary: dict       # vision layer output
-    news_sentiment: str       # bullish | bearish | neutral
-    news_score: float
-    llm_reasoning: str
-
-    # Outcome (filled in after trade)
-    outcome: Optional[str] = None      # "win" | "loss" | "breakeven" | "skipped"
-    actual_entry: Optional[float] = None
-    actual_exit: Optional[float] = None
-    pnl: Optional[float] = None
-    feedback: Optional[str] = None    # user's note
-    correct_prediction: Optional[bool] = None
-
-    created_at: str = ""
-    updated_at: str = ""
-
-    def __post_init__(self):
-        if not self.created_at:
-            self.created_at = datetime.now().isoformat()
-        if not self.id:
-            self.id = str(uuid.uuid4())[:8]
+class TradeRecord:
+    id:           str
+    stock:        str
+    date:         str
+    action:       str
+    entry:        float
+    stop:         float
+    target:       float
+    confidence:   float
+    patterns:     list
+    news_signal:  str
+    outcome:      str
+    exit_price:   float = 0.0
+    pnl:          float = 0.0
+    notes:        str   = ""
 
 
-class MemoryStore:
-    """
-    ChromaDB-backed memory store.
-    Falls back to JSON if ChromaDB not installed.
-    """
-
+class ArgusMemory:
     def __init__(self):
-        self._db = None
-        self._collection = None
-        self._json_path = MEMORY_DIR / "trades.json"
-        self._use_chroma = self._init_chroma()
+        os.makedirs(MEMORY_DIR, exist_ok=True)
+        self._client     = chromadb.PersistentClient(path=MEMORY_DIR)
+        self._collection = self._client.get_or_create_collection(
+            name="argus_trades",
+            metadata={"hnsw:space": "cosine"},
+        )
+        self._rulebook = self._load_rulebook()
 
-    def _init_chroma(self) -> bool:
+    def save_trade(self, record: TradeRecord) -> str:
+        doc = json.dumps(asdict(record))
+        self._collection.add(
+            documents=[doc],
+            ids=[record.id],
+            metadatas=[{
+                "stock":   record.stock,
+                "action":  record.action,
+                "outcome": record.outcome,
+                "date":    record.date,
+            }],
+        )
+        return record.id
+
+    def record_outcome(self, trade_id: str, outcome: str, exit_price: float = 0.0) -> bool:
         try:
-            import chromadb
-            self._db = chromadb.PersistentClient(path=str(MEMORY_DIR))
-            self._collection = self._db.get_or_create_collection(
-                name="argus_trades",
-                metadata={"hnsw:space": "cosine"}
+            res = self._collection.get(ids=[trade_id])
+            if not res["documents"]:
+                return False
+            record = json.loads(res["documents"][0])
+            record["outcome"]    = outcome
+            record["exit_price"] = exit_price
+            if exit_price and record.get("entry"):
+                mult = -1 if record["action"] == "SELL" else 1
+                record["pnl"] = round((exit_price - record["entry"]) * mult, 2)
+            self._collection.update(
+                ids=[trade_id],
+                documents=[json.dumps(record)],
+                metadatas=[{
+                    "stock":   record["stock"],
+                    "action":  record["action"],
+                    "outcome": outcome,
+                    "date":    record["date"],
+                }],
             )
+            self._update_stock_profile(record["stock"], outcome)
             return True
-        except ImportError:
-            return False
         except Exception:
             return False
 
-    # ── Save ──────────────────────────────────────────────────────────────────
-
-    def save(self, memory: TradeMemory):
-        memory.updated_at = datetime.now().isoformat()
-        if self._use_chroma:
-            self._chroma_save(memory)
-        self._json_save(memory)  # always save to JSON as backup
-
-    def _chroma_save(self, m: TradeMemory):
-        doc = f"{m.ticker} {m.signal} {m.date} {m.llm_reasoning[:200]}"
-        meta = {k: str(v) for k, v in asdict(m).items() if v is not None}
+    def recall(self, stock: str, limit: int = 5) -> list:
         try:
-            self._collection.upsert(
-                ids=[m.id],
-                documents=[doc],
-                metadatas=[meta],
-            )
+            res = self._collection.get(where={"stock": stock}, limit=limit)
+            return [json.loads(d) for d in res["documents"]]
+        except Exception:
+            return []
+
+    def stock_accuracy(self, stock: str) -> dict:
+        trades   = self.recall(stock, limit=50)
+        resolved = [t for t in trades if t["outcome"] in ("win", "loss")]
+        if not resolved:
+            return {"win_rate": 0.5, "samples": 0, "note": "no data yet"}
+        wins = sum(1 for t in resolved if t["outcome"] == "win")
+        return {
+            "win_rate": round(wins / len(resolved), 2),
+            "samples":  len(resolved),
+            "wins":     wins,
+            "losses":   len(resolved) - wins,
+        }
+
+    def memory_score(self, stock: str, action: str) -> float:
+        acc = self.stock_accuracy(stock)
+        if acc["samples"] < 3:
+            return 0.0
+        wr   = acc["win_rate"]
+        base = (wr - 0.5) * 0.6
+        return round(base, 3)
+
+    def stats(self) -> dict:
+        try:
+            res    = self._collection.get()
+            trades = [json.loads(d) for d in res["documents"]]
+        except Exception:
+            trades = []
+        resolved  = [t for t in trades if t["outcome"] in ("win", "loss")]
+        wins      = [t for t in resolved if t["outcome"] == "win"]
+        total_pnl = sum(t.get("pnl", 0) for t in resolved)
+        by_stock  = {}
+        for t in resolved:
+            s = t["stock"]
+            if s not in by_stock:
+                by_stock[s] = {"wins": 0, "losses": 0}
+            if t["outcome"] == "win":
+                by_stock[s]["wins"] += 1
+            else:
+                by_stock[s]["losses"] += 1
+        return {
+            "total_trades": len(trades),
+            "resolved":     len(resolved),
+            "wins":         len(wins),
+            "losses":       len(resolved) - len(wins),
+            "win_rate":     round(len(wins) / max(len(resolved), 1), 2),
+            "total_pnl":    round(total_pnl, 2),
+            "by_stock":     by_stock,
+        }
+
+    def pending_trades(self) -> list:
+        try:
+            res = self._collection.get(where={"outcome": "pending"})
+            return [json.loads(d) for d in res["documents"]]
+        except Exception:
+            return []
+
+    def _load_rulebook(self) -> dict:
+        try:
+            with open(RULEBOOK_PATH) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _update_stock_profile(self, stock: str, outcome: str):
+        try:
+            acc      = self.stock_accuracy(stock)
+            profiles = self._rulebook.setdefault("stock_profiles", {})
+            existing = profiles.get(stock, {})
+            existing["samples"] = acc["samples"]
+            delta = 1.0 if outcome == "win" else 0.0
+            existing["buy_reliability"]  = round(existing.get("buy_reliability", 0.5) * 0.7 + 0.3 * delta, 2)
+            existing["sell_reliability"] = round(existing.get("sell_reliability", 0.5) * 0.7 + 0.3 * delta, 2)
+            profiles[stock] = existing
+            with open(RULEBOOK_PATH, "w") as f:
+                json.dump(self._rulebook, f, indent=2)
         except Exception:
             pass
 
-    def _json_save(self, m: TradeMemory):
-        trades = self._json_load_all()
-        trades[m.id] = asdict(m)
-        self._json_path.write_text(
-            json.dumps(trades, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
 
-    # ── Load ──────────────────────────────────────────────────────────────────
-
-    def load(self, trade_id: str) -> Optional[TradeMemory]:
-        trades = self._json_load_all()
-        data = trades.get(trade_id)
-        if data:
-            return TradeMemory(**data)
-        return None
-
-    def all_trades(self) -> list[TradeMemory]:
-        trades = self._json_load_all()
-        return [TradeMemory(**v) for v in trades.values()]
-
-    def recent_trades(self, n: int = 10) -> list[TradeMemory]:
-        all_t = self.all_trades()
-        return sorted(all_t, key=lambda t: t.created_at, reverse=True)[:n]
-
-    def trades_for_ticker(self, ticker: str) -> list[TradeMemory]:
-        return [t for t in self.all_trades() if t.ticker.upper() == ticker.upper()]
-
-    # ── Update outcome ────────────────────────────────────────────────────────
-
-    def record_outcome(
-        self, trade_id: str,
-        outcome: str,
-        actual_entry: float = None,
-        actual_exit: float = None,
-        feedback: str = None,
-    ):
-        m = self.load(trade_id)
-        if not m:
-            return False
-        m.outcome = outcome
-        m.actual_entry = actual_entry
-        m.actual_exit = actual_exit
-        m.feedback = feedback
-        if actual_entry and actual_exit:
-            m.pnl = round(actual_exit - actual_entry, 2)
-            if m.signal == "BUY":
-                m.correct_prediction = actual_exit > actual_entry
-            elif m.signal == "SELL":
-                m.correct_prediction = actual_exit < actual_entry
-        self.save(m)
-        return True
-
-    # ── Stats ─────────────────────────────────────────────────────────────────
-
-    def get_stats(self) -> dict:
-        trades = [t for t in self.all_trades() if t.outcome is not None]
-        if not trades:
-            return {"total": 0, "wins": 0, "losses": 0, "win_rate": 0.0, "avg_pnl": 0.0}
-
-        wins   = sum(1 for t in trades if t.outcome == "win")
-        losses = sum(1 for t in trades if t.outcome == "loss")
-        pnls   = [t.pnl for t in trades if t.pnl is not None]
-
-        return {
-            "total":    len(trades),
-            "wins":     wins,
-            "losses":   losses,
-            "skipped":  sum(1 for t in trades if t.outcome == "skipped"),
-            "win_rate": round(wins / len(trades) * 100, 1),
-            "avg_pnl":  round(sum(pnls) / len(pnls), 2) if pnls else 0.0,
-            "total_pnl":round(sum(pnls), 2) if pnls else 0.0,
-        }
-
-    def get_signal_accuracy(self) -> dict:
-        """How accurate is each signal type?"""
-        trades = [t for t in self.all_trades() if t.correct_prediction is not None]
-        result = {"BUY": {"correct": 0, "total": 0}, "SELL": {"correct": 0, "total": 0}}
-        for t in trades:
-            if t.signal in result:
-                result[t.signal]["total"] += 1
-                if t.correct_prediction:
-                    result[t.signal]["correct"] += 1
-        for sig in result:
-            total = result[sig]["total"]
-            result[sig]["accuracy"] = round(
-                result[sig]["correct"] / total * 100, 1
-            ) if total > 0 else 0.0
-        return result
-
-    def get_ticker_history(self, ticker: str) -> dict:
-        """What's the track record for a specific stock?"""
-        trades = self.trades_for_ticker(ticker)
-        completed = [t for t in trades if t.outcome is not None]
-        if not completed:
-            return {"ticker": ticker, "trades": 0, "note": "No history yet"}
-        wins = sum(1 for t in completed if t.outcome == "win")
-        return {
-            "ticker":   ticker,
-            "trades":   len(completed),
-            "wins":     wins,
-            "win_rate": round(wins / len(completed) * 100, 1),
-            "last_signal": trades[0].signal if trades else "None",
-            "last_outcome": trades[0].outcome if completed else "None",
-        }
-
-    # ── Context for LLM ───────────────────────────────────────────────────────
-
-    def get_context_for_ticker(self, ticker: str, max_trades: int = 5) -> str:
-        """Return formatted past trade history for a ticker — injected into LLM prompt."""
-        trades = self.trades_for_ticker(ticker)[:max_trades]
-        if not trades:
-            return f"No previous trades recorded for {ticker}."
-        lines = [f"Past {ticker} trades:"]
-        for t in trades:
-            outcome_str = t.outcome or "pending"
-            pnl_str = f"  PnL: ₹{t.pnl}" if t.pnl else ""
-            lines.append(
-                f"  [{t.date}] Signal: {t.signal} ({t.conviction}) → {outcome_str}{pnl_str}"
-            )
-            if t.feedback:
-                lines.append(f"    Note: {t.feedback}")
-        return "\n".join(lines)
-
-    # ── JSON helpers ──────────────────────────────────────────────────────────
-
-    def _json_load_all(self) -> dict:
-        if not self._json_path.exists():
-            return {}
-        try:
-            return json.loads(self._json_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+def new_trade_id() -> str:
+    return str(uuid.uuid4())[:8]

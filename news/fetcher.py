@@ -1,137 +1,147 @@
 """
-ARGUS V3 — News Fetcher
-Scrapes RSS feeds from Moneycontrol, ET, Business Standard, Mint.
-No API key required.
+ARGUS V4 — News Fetcher + Sentiment Engine
+Pulls from free RSS feeds. No API key needed.
+Scores sectors as bull/bear based on keyword matching.
 """
-import json
-import time
-import hashlib
-import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
-from pathlib import Path
-from dataclasses import dataclass, asdict, field
-from typing import Optional
 
-import requests
-from config import NEWS_FEEDS, CACHE_DIR, NEWS_CACHE_HOURS
+import feedparser, re, json
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import Optional
+from config import NEWS_FEEDS
+
+
+# ─── Sector keyword maps ──────────────────────────────────────────────────────
+
+SECTOR_KEYWORDS = {
+    "BANKING":  ["bank", "rbi", "repo rate", "credit", "npa", "lending", "hdfc", "icici", "kotak", "axis"],
+    "PHARMA":   ["pharma", "drug", "fda", "medicine", "hospital", "healthcare", "sun pharma", "cipla", "divi"],
+    "IT":       ["it sector", "software", "infosys", "tcs", "wipro", "tech mahindra", "hcl", "export", "rupee"],
+    "AUTO":     ["auto", "ev", "electric vehicle", "tata motors", "maruti", "tvs", "bajaj auto", "m&m"],
+    "ENERGY":   ["oil", "gas", "power", "reliance", "adani", "ongc", "ntpc", "coal", "renewable"],
+    "NBFC":     ["nbfc", "bajaj finance", "muthoot", "chola", "pfc", "recl", "gold loan"],
+    "METAL":    ["steel", "metal", "aluminium", "tata steel", "jsw", "hindalco", "vedanta"],
+    "FMCG":     ["fmcg", "consumer", "itc", "hindustan unilever", "nestle", "dabur", "britannia"],
+}
+
+BULLISH_WORDS = [
+    "surge", "rally", "gain", "rise", "jump", "strong", "growth", "profit",
+    "beat", "record", "upgrade", "buy", "positive", "outperform", "bullish",
+    "expansion", "contract", "increase", "recovery", "boost", "upside",
+]
+BEARISH_WORDS = [
+    "fall", "drop", "decline", "loss", "weak", "miss", "downgrade", "sell",
+    "risk", "concern", "pressure", "bearish", "cut", "slowdown", "warn",
+    "crash", "tumble", "plunge", "deficit", "debt", "default",
+]
 
 
 @dataclass
-class NewsItem:
-    title: str
-    summary: str
-    source: str
-    url: str
-    published: str
-    fetched_at: str = ""
+class SectorSentiment:
+    sector: str
+    score:  float          # -1.0 (very bearish) to +1.0 (very bullish)
+    signal: str            # "bullish" / "bearish" / "neutral"
+    headlines: list[str]   = field(default_factory=list)
 
-    def __post_init__(self):
-        if not self.fetched_at:
-            self.fetched_at = datetime.now().isoformat()
 
-    @property
-    def full_text(self) -> str:
-        return f"{self.title}. {self.summary}"
+@dataclass
+class MarketSentiment:
+    overall_signal: str                     # "bullish" / "bearish" / "neutral"
+    overall_score:  float
+    sectors:        dict[str, SectorSentiment] = field(default_factory=dict)
+    top_headlines:  list[str]               = field(default_factory=list)
+    fetched_at:     str                     = ""
+    summary:        str                     = ""
 
 
 class NewsFetcher:
-    """Fetches and caches NSE market news from free RSS feeds."""
+    def __init__(self):
+        self._cache: Optional[MarketSentiment] = None
+        self._cache_time: Optional[datetime]   = None
+        self._cache_ttl = timedelta(minutes=30)
 
-    CACHE_FILE = CACHE_DIR / "news_cache.json"
-    HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+    def fetch(self, force: bool = False) -> MarketSentiment:
+        """Fetch + score headlines. Cached for 30 min unless force=True."""
+        if (not force and self._cache and self._cache_time
+                and datetime.now() - self._cache_time < self._cache_ttl):
+            return self._cache
 
-    def get_news(self, force_refresh: bool = False) -> list[NewsItem]:
-        """Return cached news or fetch fresh if stale."""
-        if not force_refresh and self._cache_valid():
-            return self._load_cache()
-        items = self._fetch_all()
-        self._save_cache(items)
-        return items
+        headlines = self._pull_headlines()
+        sentiment = self._score(headlines)
+        self._cache = sentiment
+        self._cache_time = datetime.now()
+        return sentiment
 
-    def _cache_valid(self) -> bool:
-        if not self.CACHE_FILE.exists():
-            return False
-        try:
-            data = json.loads(self.CACHE_FILE.read_text(encoding="utf-8"))
-            fetched = datetime.fromisoformat(data.get("fetched_at", "2000-01-01"))
-            return datetime.now() - fetched < timedelta(hours=NEWS_CACHE_HOURS)
-        except Exception:
-            return False
+    # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _load_cache(self) -> list[NewsItem]:
-        try:
-            data = json.loads(self.CACHE_FILE.read_text(encoding="utf-8"))
-            return [NewsItem(**item) for item in data.get("items", [])]
-        except Exception:
-            return []
-
-    def _save_cache(self, items: list[NewsItem]):
-        data = {
-            "fetched_at": datetime.now().isoformat(),
-            "items": [asdict(i) for i in items],
-        }
-        self.CACHE_FILE.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-
-    def _fetch_all(self) -> list[NewsItem]:
-        all_items = []
-        seen = set()
+    def _pull_headlines(self) -> list[str]:
+        headlines = []
         for url in NEWS_FEEDS:
             try:
-                items = self._fetch_feed(url)
-                for item in items:
-                    h = hashlib.md5(item.title.encode()).hexdigest()
-                    if h not in seen:
-                        seen.add(h)
-                        all_items.append(item)
+                feed = feedparser.parse(url)
+                for entry in feed.entries[:15]:
+                    title = entry.get("title", "")
+                    if title:
+                        headlines.append(title.lower().strip())
             except Exception:
+                pass
+        return headlines
+
+    def _score(self, headlines: list[str]) -> MarketSentiment:
+        sector_hits: dict[str, list[str]] = {s: [] for s in SECTOR_KEYWORDS}
+
+        # Match headlines to sectors
+        for h in headlines:
+            for sector, keywords in SECTOR_KEYWORDS.items():
+                if any(kw in h for kw in keywords):
+                    sector_hits[sector].append(h)
+
+        # Score each sector
+        sectors: dict[str, SectorSentiment] = {}
+        for sector, matched in sector_hits.items():
+            if not matched:
                 continue
-        return all_items[:80]  # keep top 80 headlines
+            score = 0.0
+            for h in matched:
+                bull = sum(1 for w in BULLISH_WORDS if w in h)
+                bear = sum(1 for w in BEARISH_WORDS if w in h)
+                score += (bull - bear)
+            norm = score / max(len(matched), 1)
+            norm = max(-1.0, min(1.0, norm))
+            signal = "bullish" if norm > 0.1 else ("bearish" if norm < -0.1 else "neutral")
+            sectors[sector] = SectorSentiment(
+                sector=sector,
+                score=round(norm, 2),
+                signal=signal,
+                headlines=matched[:3],
+            )
 
-    def _fetch_feed(self, url: str) -> list[NewsItem]:
-        try:
-            r = requests.get(url, headers=self.HEADERS, timeout=10)
-            r.raise_for_status()
-            root = ET.fromstring(r.content)
-        except Exception:
-            return []
+        # Overall
+        if sectors:
+            overall = sum(s.score for s in sectors.values()) / len(sectors)
+        else:
+            overall = 0.0
 
-        source = self._source_name(url)
-        items = []
+        overall_signal = "bullish" if overall > 0.1 else ("bearish" if overall < -0.1 else "neutral")
 
-        # Handle both RSS 2.0 and Atom
-        entries = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
-        for entry in entries[:20]:
-            title   = self._text(entry, ["title"])
-            summary = self._text(entry, ["description", "summary", "{http://www.w3.org/2005/Atom}summary"])
-            link    = self._text(entry, ["link", "guid"])
-            pubdate = self._text(entry, ["pubDate", "published", "updated"])
+        # Top 5 headlines
+        top = headlines[:5]
 
-            if not title:
-                continue
+        # Human-readable summary
+        bull_sectors = [s for s, v in sectors.items() if v.signal == "bullish"]
+        bear_sectors = [s for s, v in sectors.items() if v.signal == "bearish"]
+        parts = []
+        if bull_sectors:
+            parts.append(f"Bullish: {', '.join(bull_sectors)}")
+        if bear_sectors:
+            parts.append(f"Bearish: {', '.join(bear_sectors)}")
+        summary = " | ".join(parts) if parts else "No strong sector signals today"
 
-            items.append(NewsItem(
-                title     = title.strip()[:200],
-                summary   = (summary or "").strip()[:400],
-                source    = source,
-                url       = (link or "").strip(),
-                published = (pubdate or "").strip(),
-            ))
-        return items
-
-    def _text(self, el, tags: list[str]) -> Optional[str]:
-        for tag in tags:
-            child = el.find(tag)
-            if child is not None and child.text:
-                return child.text.strip()
-        return None
-
-    def _source_name(self, url: str) -> str:
-        if "moneycontrol" in url: return "Moneycontrol"
-        if "economictimes" in url: return "Economic Times"
-        if "business-standard" in url: return "Business Standard"
-        if "livemint" in url: return "Mint"
-        return "News"
+        return MarketSentiment(
+            overall_signal=overall_signal,
+            overall_score=round(overall, 2),
+            sectors=sectors,
+            top_headlines=top,
+            fetched_at=datetime.now().strftime("%H:%M"),
+            summary=summary,
+        )

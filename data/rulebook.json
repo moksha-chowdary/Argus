@@ -1,0 +1,241 @@
+{
+  "meta": {
+    "version": "4.0",
+    "trained_samples": 8,
+    "direction_accuracy": 0.875,
+    "last_updated": "2026-05-30",
+    "capital": 400000,
+    "max_risk_per_trade": 0.01,
+    "notes": "Trained on NSE intraday. Bias correction applied after discovering 0% bullish accuracy in early samples."
+  },
+
+  "scoring_weights": {
+    "chart_weight": 0.50,
+    "news_weight": 0.25,
+    "memory_weight": 0.25,
+    "live_price_bonus": 0.05
+  },
+
+  "confidence_caps": {
+    "max_confidence": 82,
+    "extended_stock_penalty": 15,
+    "multiple_support_retest_penalty": 10,
+    "weak_volume_recovery_penalty": 12,
+    "strong_market_tailwind_bonus": 8,
+    "sector_alignment_bonus": 6
+  },
+
+  "rules": [
+    {
+      "id": 1,
+      "name": "MA alignment trend",
+      "category": "trend",
+      "source": "How to Make Money in Intraday Trading",
+      "signal": "bullish",
+      "condition": "20MA > 50MA > 200MA and price above all three",
+      "entry": "Buy pullback to 20MA with bullish confirmation candle",
+      "stop": "Below swing low",
+      "target": "Previous swing high",
+      "reliability": "high",
+      "timeframe": ["15m", "1h"],
+      "score_impact": +0.25
+    },
+    {
+      "id": 2,
+      "name": "MA alignment bearish stack",
+      "category": "trend",
+      "source": "How to Make Money in Intraday Trading",
+      "signal": "bearish",
+      "condition": "20MA < 50MA < 200MA and price below all three",
+      "entry": "Sell rally into falling 20MA with bearish candle",
+      "stop": "Above swing high",
+      "target": "Previous swing low",
+      "reliability": "high",
+      "timeframe": ["15m", "1h"],
+      "score_impact": -0.25
+    },
+    {
+      "id": 3,
+      "name": "Lower high structure = default bearish",
+      "category": "structure",
+      "source": "ARGUS training — Bharat Bijlee, Axis, Bajaj Finance",
+      "signal": "bearish",
+      "condition": "Three or more lower highs on 15m chart regardless of price being near support",
+      "entry": "Short below most recent lower high confirmation",
+      "stop": "Above last lower high",
+      "target": "Previous swing low",
+      "reliability": "high",
+      "timeframe": ["15m"],
+      "score_impact": -0.30,
+      "notes": "CRITICAL — overrides support bounce assumption. Lower highs = bearish until structure breaks."
+    },
+    {
+      "id": 4,
+      "name": "Support is NOT a buy signal",
+      "category": "structure",
+      "source": "ARGUS training — Bajaj Finance post-mortem",
+      "signal": "neutral",
+      "condition": "Price at support level without higher-low structure, breakout above resistance, or volume confirmation",
+      "entry": "Do not enter. Wait for one of: higher low formed, resistance reclaimed, volume confirmation",
+      "stop": "N/A — no trade",
+      "target": "N/A — no trade",
+      "reliability": "high",
+      "timeframe": ["15m", "1h", "1d"],
+      "score_impact": 0,
+      "notes": "Support repeatedly tested becomes weaker. Third/fourth retest = breakdown probability increases."
+    },
+    {
+      "id": 5,
+      "name": "Rejection candle reversal",
+      "category": "candlestick",
+      "source": "Intraday book — rejection candle pattern",
+      "signal": "directional",
+      "condition": "Long wick candle with small body. Wick > 2x body size.",
+      "entry": "Bullish rejection (long lower wick): Buy above confirmation candle. Bearish rejection (long upper wick): Sell below confirmation candle.",
+      "stop": "Beyond wick extreme",
+      "target": "Trend continuation",
+      "reliability": "high",
+      "timeframe": ["15m", "1h"],
+      "score_impact": 0.20
+    },
+    {
+      "id": 6,
+      "name": "Giant candle momentum",
+      "category": "candlestick",
+      "source": "Intraday book — XXL candle",
+      "signal": "directional",
+      "condition": "Candle body 2x+ larger than average of last 5 candles. Indicates institutional participation.",
+      "entry": "Bullish giant: Buy above high. Bearish giant: Sell below low.",
+      "stop": "Opposite end of giant candle",
+      "target": "Ride trend with trailing stop",
+      "reliability": "high",
+      "timeframe": ["15m", "1h"],
+      "score_impact": 0.20
+    },
+    {
+      "id": 7,
+      "name": "Lilliput breakout",
+      "category": "candlestick",
+      "source": "Intraday book — XXS candle volatility contraction",
+      "signal": "neutral_breakout",
+      "condition": "3+ consecutive tiny candles much smaller than surrounding candles. Volatility contraction before expansion.",
+      "entry": "Buy above range high. Sell below range low.",
+      "stop": "Opposite side of Lilliput range",
+      "target": "1x-3x range extension",
+      "reliability": "high",
+      "timeframe": ["15m"],
+      "score_impact": 0.15
+    },
+    {
+      "id": 8,
+      "name": "Breakdown-weak retest short",
+      "category": "structure",
+      "source": "ARGUS training — Reliance post-mortem",
+      "signal": "bearish",
+      "condition": "Price breaks support with volume. Then bounces weakly. Buyers fail to reclaim prior structure. Lower highs still intact after bounce.",
+      "entry": "Short on failed retest. Entry below retest high.",
+      "stop": "Above retest high",
+      "target": "Next support level",
+      "reliability": "high",
+      "timeframe": ["15m", "1h"],
+      "score_impact": -0.28,
+      "notes": "One of the strongest NSE setups. Reliance showed this cleanly."
+    },
+    {
+      "id": 9,
+      "name": "Exhaustion reversal — never short extended decline",
+      "category": "reversal",
+      "source": "ARGUS training — Muthoot Finance bear trap",
+      "signal": "warning",
+      "condition": "Stock already down 3%+ intraday. Volume expanding at lows. Candles losing downside momentum.",
+      "entry": "Reduce bearish confidence. Look for stabilization + explosive reclaim before shorting.",
+      "stop": "N/A — rule reduces confidence, not a direct entry signal",
+      "target": "N/A",
+      "reliability": "high",
+      "timeframe": ["15m"],
+      "score_impact": -0.15,
+      "notes": "Reversal checklist: (1) significant prior decline? (2) volume spike at lows? (3) candles slowing? If all yes — WAIT."
+    },
+    {
+      "id": 10,
+      "name": "Extended stock penalty",
+      "category": "risk",
+      "source": "ARGUS training — Netweb Technologies",
+      "signal": "penalty",
+      "condition": "Stock already moved >10% in current session or >20% in last 3 sessions.",
+      "entry": "Do not chase. Wait for consolidation first. Reduce confidence by 15-20 points.",
+      "stop": "N/A — confidence penalty only",
+      "target": "N/A",
+      "reliability": "high",
+      "timeframe": ["1d"],
+      "score_impact": -0.20,
+      "notes": "Distribution volume at top looks like continuation volume. Do not be fooled."
+    },
+    {
+      "id": 11,
+      "name": "Market tailwind alignment",
+      "category": "macro",
+      "source": "ARGUS training — TVS motor May 26",
+      "signal": "context",
+      "condition": "NIFTY up >1% — only look for longs. NIFTY down >1% — only look for shorts. Stock diverging from NIFTY direction = strong signal in divergence direction.",
+      "entry": "Never short against a strong bull day unless stock shows clear relative weakness.",
+      "stop": "N/A — context filter",
+      "target": "N/A",
+      "reliability": "high",
+      "timeframe": ["1d"],
+      "score_impact": 0.10,
+      "notes": "TVS was up because NIFTY was up, not because of its own strength. Always check relative strength."
+    },
+    {
+      "id": 12,
+      "name": "Two 15m candle confirmation",
+      "category": "entry_timing",
+      "source": "ARGUS training — ICICI Bank live trade",
+      "signal": "timing",
+      "condition": "After 9:15 AM open, never enter in first 15 minutes. Wait for first 2 x 15m candles to close.",
+      "entry": "Enter only after 9:45 AM if: both candles green, price holds above key level, no large red wick on candle 2.",
+      "stop": "Below opening range low",
+      "target": "First resistance",
+      "reliability": "very_high",
+      "timeframe": ["15m"],
+      "score_impact": 0,
+      "notes": "Pure timing rule. Not directional. Prevents getting caught in 9:15-9:30 operator manipulation."
+    }
+  ],
+
+  "stock_profiles": {
+    "RELIANCE": {
+      "buy_reliability": 0.40,
+      "sell_reliability": 0.73,
+      "notes": "Relief rallies fail. Lower high structure very reliable.",
+      "samples": 1
+    },
+    "ICICIBANK": {
+      "buy_reliability": 0.65,
+      "sell_reliability": 0.50,
+      "notes": "V-recovery in strong market works. Tight spread, liquid.",
+      "samples": 1
+    },
+    "BBJEE": {
+      "buy_reliability": 0.30,
+      "sell_reliability": 0.50,
+      "notes": "Low liquidity — spreads wide, moves fast. Misread distribution as accumulation once.",
+      "samples": 1
+    }
+  },
+
+  "sector_sentiment_overrides": {
+    "PHARMA": {
+      "note": "Sector rotates out on strong bank days. Check NIFTY PHARMA vs NIFTY BANK divergence.",
+      "bias": "neutral"
+    },
+    "BANKING": {
+      "note": "Leads on RBI news days and broad market up-days.",
+      "bias": "bullish"
+    },
+    "NBFC": {
+      "note": "Volatile. Follow Bajaj Finance as sector proxy.",
+      "bias": "neutral"
+    }
+  }
+}
