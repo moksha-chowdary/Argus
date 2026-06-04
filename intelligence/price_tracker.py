@@ -1,27 +1,34 @@
 """
-ARGUS V4 — Live Price Tracker
-Fetches NSE prices via yfinance. Respects the live_feed toggle.
+ARGUS V4 — Live Price Tracker + OHLCV candle fetcher
+- Background polling for watchlist prices
+- Per-stock 15m candle data for indicator calculation
+- yfinance error spam suppressed completely
 """
 
-import threading, time, json
+import threading, time, logging, warnings, contextlib, io
 from datetime import datetime
 from typing import Optional
+import pandas as pd
+
+# Suppress ALL yfinance/peewee noise before import
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+logging.getLogger("peewee").setLevel(logging.CRITICAL)
+logging.getLogger("urllib3").setLevel(logging.CRITICAL)
+warnings.filterwarnings("ignore")
+
 import yfinance as yf
 from config import WATCHLIST, NIFTY_TICKER, BANKNIFTY_TICKER, PRICE_REFRESH_SEC
 
 
 class PriceTracker:
     def __init__(self):
-        self._prices: dict  = {}          # ticker → {price, change_pct, high, low, volume}
-        self._lock          = threading.Lock()
-        self._running       = False
+        self._prices: dict = {}
+        self._lock         = threading.Lock()
+        self._running      = False
         self._thread: Optional[threading.Thread] = None
-        self._last_update   = None
-
-    # ── Public API ────────────────────────────────────────────────────────────
+        self._last_update  = None
 
     def start(self):
-        """Start background polling thread."""
         if self._running:
             return
         self._running = True
@@ -29,11 +36,9 @@ class PriceTracker:
         self._thread.start()
 
     def stop(self):
-        """Stop polling (called when live_feed toggled OFF)."""
         self._running = False
 
     def get(self, ticker: str) -> Optional[dict]:
-        """Return latest data for a ticker (e.g. 'ICICIBANK.NS')."""
         with self._lock:
             return self._prices.get(ticker)
 
@@ -46,15 +51,35 @@ class PriceTracker:
             return self._prices.get(BANKNIFTY_TICKER)
 
     def snapshot(self) -> dict:
-        """Return all current prices as dict."""
         with self._lock:
             return dict(self._prices)
 
     def last_update(self) -> Optional[str]:
         return self._last_update
 
-    def fetch_once(self, tickers: list[str]) -> dict:
-        """One-shot fetch (used when live feed is OFF but user explicitly asks)."""
+    def fetch_candles(self, ticker: str, interval: str = "15m", period: str = "5d") -> Optional[pd.DataFrame]:
+        """
+        Fetch OHLCV candles for a specific stock.
+        Used by the brain for real indicator calculation.
+        Returns a DataFrame with columns: Open, High, Low, Close, Volume
+        """
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                df = yf.download(
+                    ticker, period=period, interval=interval,
+                    progress=False, auto_adjust=True,
+                )
+            if df is None or df.empty:
+                return None
+            # Flatten MultiIndex columns if present
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df = df.dropna()
+            return df if len(df) >= 5 else None
+        except Exception:
+            return None
+
+    def fetch_once(self, tickers: list) -> dict:
         return self._fetch(tickers)
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -71,32 +96,37 @@ class PriceTracker:
                 pass
             time.sleep(PRICE_REFRESH_SEC)
 
-    def _fetch(self, tickers: list[str]) -> dict:
+    def _fetch(self, tickers: list) -> dict:
         result = {}
+        if not tickers:
+            return result
         try:
-            raw = yf.download(
-                tickers,
-                period="1d",
-                interval="1m",
-                progress=False,
-                threads=True,
-                auto_adjust=True,
-            )
-            # yfinance returns MultiIndex when multiple tickers
+            with contextlib.redirect_stderr(io.StringIO()):
+                raw = yf.download(
+                    tickers, period="1d", interval="1m",
+                    progress=False, threads=True, auto_adjust=True,
+                )
+            if raw is None or raw.empty:
+                return result
+
+            # Handle single vs multi-ticker response
+            is_multi = isinstance(raw.columns, pd.MultiIndex)
+
             for t in tickers:
                 try:
-                    if len(tickers) == 1:
-                        close  = float(raw["Close"].iloc[-1])
-                        open_  = float(raw["Open"].iloc[0])
-                        high   = float(raw["High"].max())
-                        low    = float(raw["Low"].min())
-                        vol    = int(raw["Volume"].sum())
+                    if is_multi:
+                        close  = float(raw["Close"][t].dropna().iloc[-1])
+                        open_  = float(raw["Open"][t].dropna().iloc[0])
+                        high   = float(raw["High"][t].dropna().max())
+                        low    = float(raw["Low"][t].dropna().min())
+                        vol    = int(raw["Volume"][t].dropna().sum())
                     else:
-                        close  = float(raw["Close"][t].iloc[-1])
-                        open_  = float(raw["Open"][t].iloc[0])
-                        high   = float(raw["High"][t].max())
-                        low    = float(raw["Low"][t].min())
-                        vol    = int(raw["Volume"][t].sum())
+                        # Single ticker — no secondary index
+                        close  = float(raw["Close"].dropna().iloc[-1])
+                        open_  = float(raw["Open"].dropna().iloc[0])
+                        high   = float(raw["High"].dropna().max())
+                        low    = float(raw["Low"].dropna().min())
+                        vol    = int(raw["Volume"].dropna().sum())
 
                     chg_pct = round((close - open_) / open_ * 100, 2) if open_ else 0.0
                     result[t] = {
@@ -108,7 +138,7 @@ class PriceTracker:
                         "open":       round(open_, 2),
                     }
                 except Exception:
-                    pass
+                    continue
         except Exception:
             pass
         return result

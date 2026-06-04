@@ -1,55 +1,56 @@
-"""
-ARGUS V4 — Central Config
-Edit this file to change behaviour without touching any other code.
-"""
+"""ARGUS V4 — Central Config"""
 
-import os
+import os, logging, warnings
 
-# ─── Paths ────────────────────────────────────────────────────────────────────
+# Suppress noise globally
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+logging.getLogger("peewee").setLevel(logging.CRITICAL)
+warnings.filterwarnings("ignore")
+
 BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
 RULEBOOK_PATH = os.path.join(BASE_DIR, "data", "rulebook.json")
 MEMORY_DIR    = os.path.join(BASE_DIR, "data", "memory")
 LOG_PATH      = os.path.join(BASE_DIR, "data", "trade_log.json")
-STATE_PATH    = os.path.join(BASE_DIR, "data", "state.json")   # persists live_feed toggle
+STATE_PATH    = os.path.join(BASE_DIR, "data", "state.json")
 
-# ─── Ollama ───────────────────────────────────────────────────────────────────
+# Default watch folder — charts dropped here are auto-analyzed
+WATCH_FOLDER  = os.path.join(BASE_DIR, "charts")
+
+# Ollama
 OLLAMA_URL    = "http://localhost:11434"
 OLLAMA_MODEL  = "gemma4:latest"
 MAX_TOKENS    = 500
 CTX_WINDOW    = 2048
 TEMPERATURE   = 0.3
 
-# ─── Capital ──────────────────────────────────────────────────────────────────
+# Capital
 CAPITAL       = 400_000
-MAX_RISK_PCT  = 0.01          # 1 % per trade = ₹4,000
+MAX_RISK_PCT  = 0.01
 
-# ─── Live feed (can be toggled at runtime via 'livefeed on/off') ──────────────
-LIVE_FEED_DEFAULT = True      # starts ON — user can toggle
-PRICE_REFRESH_SEC = 30        # how often to refresh live prices
-NEWS_REFRESH_MIN  = 30        # how often to re-fetch news (minutes)
+# Live feed
+LIVE_FEED_DEFAULT = True
+PRICE_REFRESH_SEC = 30
+NEWS_REFRESH_MIN  = 30
 
-# ─── NSE tickers to watch (auto-fetched on startup if live feed is ON) ────────
+# Watchlist — verified NSE tickers for yfinance
 WATCHLIST = [
-    "RELIANCE.NS", "ICICIBANK.NS", "HDFCBANK.NS", "AXISBANK.NS",
-    "BAJFINANCE.NS", "TATAMOTORS.NS", "WIPRO.NS", "SUNPHARMA.NS",
-    "ADANIENT.NS", "KOTAKBANK.NS", "INFY.NS", "TCS.NS",
+    "RELIANCE.NS",  "ICICIBANK.NS",  "HDFCBANK.NS",  "AXISBANK.NS",
+    "BAJFINANCE.NS","TATAMOTORS.NS", "WIPRO.NS",      "SUNPHARMA.NS",
+    "ADANIENT.NS",  "KOTAKBANK.NS",  "INFY.NS",       "TCS.NS",
 ]
 
-# ─── NIFTY / BankNifty indices ────────────────────────────────────────────────
 NIFTY_TICKER     = "^NSEI"
 BANKNIFTY_TICKER = "^NSEBANK"
 
-# ─── News sources (RSS, no key needed) ───────────────────────────────────────
 NEWS_FEEDS = [
     "https://www.moneycontrol.com/rss/MCtopnews.xml",
     "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
     "https://www.business-standard.com/rss/markets-106.rss",
 ]
 
-# ─── Tesseract path (Windows) ─────────────────────────────────────────────────
+# Tesseract — Windows path
 TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-# ─── Display ──────────────────────────────────────────────────────────────────
 BANNER = r"""
     ___    ____  ______  __  _______
    /   |  / __ \/ ____/ / / / / ___/
