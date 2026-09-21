@@ -75,14 +75,16 @@ class FeatureStore:
         base_price: float,
         prob_dl: Optional[float] = None,
         action_dl: Optional[str] = None,
+        daily_asof: Optional[str] = None,
     ):
-        """Log a new prediction made at time T with auditable features_asof."""
+        """Log a new prediction made at time T with auditable features_asof and daily_asof."""
         with self._lock, self._get_session() as session:
             record = PredictionRecord(
                 id=pred_id,
                 timestamp=str(timestamp),
                 ticker=ticker.upper(),
                 features_asof=str(features_asof),
+                daily_asof=str(daily_asof) if daily_asof else None,
                 features_json=json.dumps(features),
                 prob_online=float(prob_online),
                 action_online=str(action_online),
@@ -153,6 +155,7 @@ class FeatureStore:
                 "prediction_id": pred_id,
                 "ticker": pred.ticker,
                 "features_asof": pred.features_asof,
+                "daily_asof": pred.daily_asof,
                 "features": features,
                 "base_price": base_price,
                 "realized_price": realized_price,
@@ -168,7 +171,7 @@ class FeatureStore:
             }
 
     def get_pending_predictions(self, ticker: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Fetch all unresolved predictions awaiting realization at T+5min."""
+        """Fetch all unresolved predictions awaiting realization at T+15min."""
         with self._lock, self._get_session() as session:
             query = session.query(PredictionRecord).filter(PredictionRecord.status == "pending")
             if ticker:
@@ -182,6 +185,7 @@ class FeatureStore:
                     "timestamp": r.timestamp,
                     "ticker": r.ticker,
                     "features_asof": r.features_asof,
+                    "daily_asof": r.daily_asof,
                     "features": json.loads(r.features_json),
                     "prob_online": r.prob_online,
                     "action_online": r.action_online,

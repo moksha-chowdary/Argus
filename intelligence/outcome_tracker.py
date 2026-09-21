@@ -35,7 +35,7 @@ class OutcomeTracker:
         feature_store: Optional[FeatureStore] = None,
         buy_threshold: float = 0.58,
         sell_threshold: float = 0.42,
-        horizon_minutes: int = 5,
+        horizon_minutes: int = 15,
     ):
         self.feature_store = feature_store or FeatureStore()
         self.online_learner = online_learner or OnlineLearner(feature_store=self.feature_store)
@@ -46,7 +46,7 @@ class OutcomeTracker:
         self._stop_bg = False
 
     def start_background_tracker(self, interval_sec: int = 30):
-        """Starts a persistent background thread that polls and resolves pending T+5 predictions."""
+        """Starts a persistent background thread that polls and resolves pending T+15 predictions."""
         if self._bg_thread and self._bg_thread.is_alive():
             return
 
@@ -57,7 +57,7 @@ class OutcomeTracker:
         def default_price_lookup(symbol: str) -> Optional[float]:
             try:
                 t = yf.Ticker(symbol)
-                hist = t.history(period="1d", interval="5m")
+                hist = t.history(period="1d", interval="15m")
                 if not hist.empty:
                     return float(hist["Close"].iloc[-1])
             except Exception:
@@ -114,6 +114,7 @@ class OutcomeTracker:
         base_price: float,
         timestamp: Optional[str] = None,
         dl_prob: Optional[float] = None,
+        daily_asof: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Logs a prediction at time T with strict leakage prevention audit metadata.
@@ -141,6 +142,7 @@ class OutcomeTracker:
             base_price=base_price,
             prob_dl=dl_prob,
             action_dl=action_dl,
+            daily_asof=daily_asof,
         )
 
         return {
@@ -148,6 +150,7 @@ class OutcomeTracker:
             "timestamp": now_ts,
             "ticker": ticker.upper(),
             "features_asof": features_asof,
+            "daily_asof": daily_asof,
             "base_price": base_price,
             "prob_online": prob_online,
             "action_online": action_online,
@@ -166,7 +169,7 @@ class OutcomeTracker:
         realized_timestamp: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Resolves a prediction at T+5min:
+        Resolves a prediction at T+15min:
         - Computes true label y in {0, 1}
         - Updates OnlineLearner via learn_one()
         - Updates FeatureStore outcomes table

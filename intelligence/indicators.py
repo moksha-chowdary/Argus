@@ -44,6 +44,10 @@ class IndicatorResult:
     macd_hist:   Optional[float] = None
     macd_cross:  str = "none"    # "bullish_cross" / "bearish_cross" / "none"
 
+    # ATR (Volatility)
+    atr:         Optional[float] = None
+    atr_pct:     Optional[float] = None
+
     # Volume
     volume_current: int   = 0
     volume_avg_20:  float = 0.0
@@ -136,6 +140,19 @@ def calculate(df: pd.DataFrame) -> IndicatorResult:
                 res.macd_cross = "bullish_cross"
             elif prev_h > 0 and curr_h < 0:
                 res.macd_cross = "bearish_cross"
+
+    # ── ATR (Average True Range 14) ───────────────────────────────────────────
+    if len(close) >= 5 and "High" in df.columns and "Low" in df.columns:
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        prev_close = close.shift(1)
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr_series = tr.rolling(min(14, len(tr))).mean()
+        res.atr = round(float(atr_series.dropna().iloc[-1]), 2)
+        res.atr_pct = round(float(res.atr / res.current_price * 100.0), 3) if res.current_price > 0 else 0.0
 
     # ── Volume ────────────────────────────────────────────────────────────────
     vol_series    = df["Volume"]

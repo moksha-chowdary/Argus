@@ -136,7 +136,7 @@ class ArgusBrain:
 
         if candle_df is not None and len(candle_df) >= 20:
             try:
-                numeric_feats, features_asof = calculate_numeric_features(
+                numeric_feats, features_asof, daily_asof = calculate_numeric_features(
                     df=candle_df,
                     ticker=ticker,
                     feature_store=self.feature_store,
@@ -147,6 +147,7 @@ class ArgusBrain:
                     ticker=ticker_clean,
                     features=numeric_feats,
                     features_asof=features_asof,
+                    daily_asof=daily_asof,
                     base_price=base_price,
                 )
                 pred_id = pred_rec["prediction_id"]
@@ -186,26 +187,28 @@ class ArgusBrain:
         # Scaled integer confidence (0 to 100)
         conf_int = int(min(90, max(20, conf_score * 85 * session_mult)))
 
-        # ── 4. Position Sizing & Risk Management ──────────────────────────────
+        # ── 4. Position Sizing & Risk Management (15-Minute Tuned) ────────────
         entry = stop = target = 0.0
         qty = cap_req = max_loss_val = 0
         rr_str = ""
 
         if action != "WAIT" and base_price > 0:
+            # 15-Minute tuned ATR-based target and stop-loss
+            # Filters microstructure noise; stop = 1.0x ATR, target = 2.0x ATR (1:2 R:R)
+            atr_val = indicators.atr if (indicators and indicators.atr and indicators.atr > 0) else (base_price * 0.012)
+            stop_dist = max(atr_val * 1.0, base_price * 0.01)
+
             if action == "BUY":
                 entry = round(base_price * 1.0005, 2)
-                # Use real ATR or 2% stop loss
-                stop_dist = base_price * 0.02
-                if indicators and indicators.support and indicators.support < base_price:
-                    stop = round(indicators.support * 0.998, 2)
+                if indicators and indicators.support and indicators.support < base_price and (base_price - indicators.support) <= atr_val * 1.8:
+                    stop = round(min(indicators.support * 0.998, base_price - stop_dist), 2)
                 else:
                     stop = round(base_price - stop_dist, 2)
                 target = round(entry + (entry - stop) * 2.0, 2)
             else:  # SELL
                 entry = round(base_price * 0.9995, 2)
-                stop_dist = base_price * 0.02
-                if indicators and indicators.resistance and indicators.resistance > base_price:
-                    stop = round(indicators.resistance * 1.002, 2)
+                if indicators and indicators.resistance and indicators.resistance > base_price and (indicators.resistance - base_price) <= atr_val * 1.8:
+                    stop = round(max(indicators.resistance * 1.002, base_price + stop_dist), 2)
                 else:
                     stop = round(base_price + stop_dist, 2)
                 target = round(entry - (stop - entry) * 2.0, 2)

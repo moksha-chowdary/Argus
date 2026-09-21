@@ -63,6 +63,7 @@ class PredictionRecord(Base):
     timestamp = Column(String(64), nullable=False, index=True)
     ticker = Column(String(32), nullable=False, index=True)
     features_asof = Column(String(64), nullable=False)
+    daily_asof = Column(String(64), nullable=True)
     features_json = Column(Text, nullable=False)
     prob_online = Column(Float, nullable=False)
     action_online = Column(String(16), nullable=False)
@@ -136,6 +137,15 @@ class DriftEventRecord(Base):
 def init_db():
     """Initializes all database tables if they do not already exist."""
     Base.metadata.create_all(bind=engine)
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(predictions)")).fetchall()]
+            if cols and "daily_asof" not in cols:
+                conn.execute(text("ALTER TABLE predictions ADD COLUMN daily_asof VARCHAR(64)"))
+                conn.commit()
+    except Exception:
+        pass
 
 
 def get_db() -> Generator[Session, None, None]:

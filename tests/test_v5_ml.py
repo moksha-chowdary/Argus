@@ -72,12 +72,48 @@ def test_feature_engineering_strict_asof():
 
     # Cut off at bar 25
     cutoff_time = dates[25]
-    feats, asof = calculate_numeric_features(df, ticker="TEST.NS", asof_timestamp=cutoff_time)
+    feats, asof, daily_asof = calculate_numeric_features(df, ticker="TEST.NS", asof_timestamp=cutoff_time)
 
     assert len(feats) == len(FEATURE_COLUMNS)
+    assert len(feats) == 40
     assert asof == cutoff_time.isoformat()
+    assert daily_asof is not None
+    # Verify daily context features exist
+    assert "daily_ret_3" in feats
+    assert "daily_dist_ema20" in feats
+    assert "daily_atr14_pct" in feats
     # Confirm norm_rsi is within [0, 1]
     assert 0.0 <= feats["norm_rsi"] <= 1.0
+
+
+def test_multi_timeframe_leakage_guard():
+    from data.multi_timeframe import fetch_daily_context
+    daily_dates = pd.date_range("2026-06-01", periods=60, freq="D")
+    df_daily = pd.DataFrame({
+        "Open": np.linspace(100, 200, 60),
+        "High": np.linspace(105, 205, 60),
+        "Low": np.linspace(95, 195, 60),
+        "Close": np.linspace(102, 202, 60),
+        "Volume": np.random.randint(1000, 5000, 60),
+    }, index=daily_dates)
+
+    # Intraday prediction made on 2026-07-20 10:30 IST
+    # Strict point-in-time leakage guard MUST use completed daily candle as of 2026-07-19
+    asof_time = "2026-07-20T10:30:00+05:30"
+    daily_feats, daily_asof = fetch_daily_context(
+        ticker="TEST.NS",
+        asof_timestamp=asof_time,
+        daily_df=df_daily,
+    )
+
+    assert daily_asof == "2026-07-19"
+    assert "daily_ret_3" in daily_feats
+    assert "daily_dist_ema20" in daily_feats
+    assert "daily_dist_ema50" in daily_feats
+    assert "daily_atr14_pct" in daily_feats
+    assert "daily_prox_swing_high" in daily_feats
+    assert "daily_prox_swing_low" in daily_feats
+    assert "daily_weekly_momentum" in daily_feats
 
 
 def test_online_learner_stream_update(temp_env):
@@ -101,26 +137,29 @@ def test_outcome_tracker_resolution_loop(temp_env):
     tracker = temp_env["tracker"]
     feats = {"ret_1": 0.005, "norm_rsi": 0.65, "norm_atr": 0.015}
 
-    # 1. Prediction at T
+    # 1. Prediction at T (with daily_asof audit metadata)
     pred = tracker.record_prediction(
         ticker="TCS",
         features=feats,
         features_asof="2026-09-21T11:00:00",
+        daily_asof="2026-09-20",
         base_price=3800.0,
         timestamp="2026-09-21T11:00:00"
     )
     assert pred["prediction_id"].startswith("pred_")
+    assert pred["daily_asof"] == "2026-09-20"
 
-    # 2. Realization at T+5min (Price moved up to 3825.0)
+    # 2. Realization at T+15min (Price moved up to 3825.0)
     res = tracker.resolve_prediction(
         pred_id=pred["prediction_id"],
         realized_price=3825.0,
-        realized_timestamp="2026-09-21T11:05:00"
+        realized_timestamp="2026-09-21T11:15:00"
     )
     assert res is not None
     assert res["realized_label"] == 1
     assert res["price_change_pct"] > 0
     assert res["prediction_id"] == pred["prediction_id"]
+    assert res["daily_asof"] == "2026-09-20"
 
 
 def test_dl_retrainer_batch_optimization(temp_env):

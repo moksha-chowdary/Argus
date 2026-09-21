@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from data.feature_store import FeatureStore
+from data.multi_timeframe import fetch_daily_context
 
 
 def calculate_numeric_features(
@@ -23,7 +24,8 @@ def calculate_numeric_features(
     asof_timestamp: Optional[datetime | str] = None,
     feature_store: Optional[FeatureStore] = None,
     sector: Optional[str] = None,
-) -> Tuple[Dict[str, float], str]:
+    daily_df: Optional[pd.DataFrame] = None,
+) -> Tuple[Dict[str, float], str, str]:
     """
     Extracts continuous numeric features from OHLCV data up to asof_timestamp.
 
@@ -255,17 +257,57 @@ def calculate_numeric_features(
         "effective_sentiment": round(effective_sentiment, 4),
     }
 
-    return features, features_asof
+    # ── 8. Slow / Daily-Context Features (Multi-Timeframe Layer) ──────────────
+    # Strictly enforced point-in-time leakage guard:
+    # Uses completed daily candles strictly prior to the current trading date (date < T.date).
+    # Today's still-forming daily candle is NEVER included.
+    daily_feats, daily_asof = fetch_daily_context(
+        ticker=ticker,
+        asof_timestamp=features_asof,
+        daily_df=daily_df,
+    )
+    features.update(daily_feats)
+
+    return features, features_asof, daily_asof
 
 
-FEATURE_COLUMNS = [
+# ==============================================================================
+# AUDITABLE FEATURE ARCHITECTURE: FAST INTRADAY (15m) + SLOW DAILY-CONTEXT
+# ==============================================================================
+
+# ── Fast / Intraday Features (Recomputed on each 15-minute candle bar) ────────
+FAST_INTRADAY_FEATURES = [
+    # Multi-lag log returns (on 15m candles: 15m, 45m, 75m, 225m momentum)
     "ret_1", "ret_3", "ret_5", "ret_15",
+    # Volatility & candle geometry
     "norm_atr", "rolling_std_10", "body_pct", "upper_wick_pct", "lower_wick_pct",
+    # Oscillators
     "norm_rsi", "norm_macd", "norm_macd_signal", "norm_macd_diff",
     "bb_width", "bb_pct_b",
+    # Intraday Moving Average Spreads
     "spread_price_ema20", "spread_ema20_ema50", "spread_ema50_ema200",
+    # Volume statistics
     "vol_zscore", "vol_ratio",
+    # Cyclical intraday time & session markers
     "time_sin", "time_cos", "day_sin", "day_cos",
     "is_morning_rush", "is_midday", "is_power_hour",
+    # Point-in-time news sentiment
     "sentiment_score", "sentiment_delta", "effective_sentiment",
 ]
+
+# ── Slow / Daily-Context Features (Computed once daily, held constant intraday) ─
+SLOW_DAILY_FEATURES = [
+    # Multi-day trend: % change over 3, 5, 20, 60 trading days
+    "daily_ret_3", "daily_ret_5", "daily_ret_20", "daily_ret_60",
+    # Distance from 20-day and 50-day daily moving averages (%)
+    "daily_dist_ema20", "daily_dist_ema50",
+    # Daily ATR (14-day) as % of price (macro volatility regime indicator)
+    "daily_atr14_pct",
+    # Proximity to recent swing high/low over 60-day lookback window (%)
+    "daily_prox_swing_high", "daily_prox_swing_low",
+    # Weekly momentum: return over last 5 trading days vs. prior 5 trading days (%)
+    "daily_weekly_momentum",
+]
+
+FEATURE_COLUMNS = FAST_INTRADAY_FEATURES + SLOW_DAILY_FEATURES
+

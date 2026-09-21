@@ -55,8 +55,8 @@ DEFAULT_DL_PATH = os.path.join(DEFAULT_MODEL_DIR, "dl_lstm.pt")
 class MarketLSTM(nn.Module):
     """
     2-Layer LSTM with Input BatchNorm1d and GELU projection head for calibrated directional probability.
-    Input shape:  (Batch, Seq_Len, Feature_Dim)
-    Output shape: (Batch, 1) in [0.0, 1.0] representing P(Price_{t+5} > Price_t)
+    Input shape:  (Batch, Seq_Len, Feature_Dim) [Default Feature_Dim = 40]
+    Output shape: (Batch, 1) in [0.0, 1.0] representing P(Price_{t+15m} > Price_t)
     """
 
     def __init__(self, input_dim: int, hidden_dim: int = 48, num_layers: int = 2, dropout: float = 0.2):
@@ -108,7 +108,7 @@ class DeepLearningRetrainer:
 
     def __init__(
         self,
-        input_dim: int = 30,
+        input_dim: int = 40,
         seq_len: int = 15,
         hidden_dim: int = 64,
         lr: float = 1e-3,
