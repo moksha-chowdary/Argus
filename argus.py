@@ -41,6 +41,8 @@ from intelligence.indicators import calculate as calc_indicators
 from intelligence.watcher import FolderWatcher
 from intelligence.alerts import AlertManager, _beep
 from news.fetcher import NewsFetcher
+from news.scheduler import NewsScheduler
+from evaluation.backtest import WalkForwardBacktest, print_backtest_report
 from memory.store import ArgusMemory, TradeRecord, new_trade_id
 
 # ── ANSI ──────────────────────────────────────────────────────────────────────
@@ -96,6 +98,16 @@ def print_signal(sig, stock_name: str = ""):
           f"Confidence: {col(str(sig.confidence)+'%', W)}  |  "
           f"Session: {col(sig.session, session_col)}")
     print(f"  Conviction : {sig.conviction}  |  R/R: {col(sig.rr_ratio or 'N/A', W)}")
+    
+    # V5 ML Probabilities & Drift Telemetry
+    p_up_c = G if sig.prob_online >= 0.55 else (R if sig.prob_online <= 0.45 else Y)
+    dl_c   = G if sig.prob_dl >= 0.55 else (R if sig.prob_dl <= 0.45 else Y)
+    drift_c = R if sig.drift_status != "stable" else G
+    print(f"  ML Prob    : River Online={col(f'{sig.prob_online:.1%}', p_up_c)}  |  "
+          f"PyTorch LSTM={col(f'{sig.prob_dl:.1%}', dl_c)}  |  "
+          f"ADWIN={col(sig.drift_status.upper(), drift_c)}")
+    if sig.prediction_id:
+        print(f"  Audit      : ID={col(sig.prediction_id, C)}  as-of={col(sig.features_asof, DM)}")
     print()
 
     # Live price
@@ -245,6 +257,10 @@ def print_help():
         ("history <STOCK>",                "Past trades for a stock"),
         ("train",                          "Training mode"),
         ("reload",                         "Reload rulebook.json"),
+        ("backtest [STOCK]",               "Run walk-forward validation (zero leakage)"),
+        ("drift",                          "Show recent ADWIN concept drift events"),
+        ("retrain",                        "Retrain PyTorch LSTM on feature store"),
+        ("news_scan",                      "Trigger FinBERT RSS scrape & sentiment cycle"),
         ("model <name>",                   "Switch LLM model"),
         ("reset",                          "Clear chat memory"),
         ("clear",                          "Clear screen"),
@@ -322,6 +338,7 @@ def run_analysis(path, analyzer, brain, llm, mem, tracker,
         indicators=indicators,
         live_feed_on=live_feed,
         ticker=ticker,
+        candle_df=df if live_feed else None,
     )
 
     print_signal(sig, ticker)
@@ -712,6 +729,53 @@ def repl(args, analyzer, brain, llm, mem, tracker,
         elif low in ("train","training"):
             training_mode(analyzer, brain, llm, mem, tracker, live_feed)
 
+        elif low.startswith("backtest"):
+            parts = user.split()
+            bt_ticker = (parts[1].upper() + ".NS" if not parts[1].upper().endswith(".NS") else parts[1].upper()) if len(parts) > 1 else "RELIANCE.NS"
+            print(col(f"\n  Running Walk-Forward Backtest on {bt_ticker}...", C))
+            try:
+                bt_df = tracker.fetch_candles(bt_ticker, interval="5m", period="1mo")
+                if bt_df is None or len(bt_df) < 100:
+                    bt_df = tracker.fetch_candles(bt_ticker, interval="5m", period="5d")
+                engine = WalkForwardBacktest()
+                rpt = engine.run(bt_df, ticker=bt_ticker, warmup_bars=60)
+                print_backtest_report(rpt, bt_ticker)
+            except Exception as e:
+                print(col(f"  Backtest failed: {e}", R))
+
+        elif low == "drift":
+            events = brain.feature_store.get_drift_events(limit=10)
+            if not events:
+                print(col("  No concept drift events recorded. Model is stable.", G))
+            else:
+                print(f"\n{hr()}")
+                print(f"  {col('ADWIN CONCEPT DRIFT AUDIT TRAIL', BLD)}")
+                print(hr("─"))
+                for ev in events:
+                    print(f"  {col(ev['timestamp'][:19], DM)}  {col(ev['metric_name'], Y)}  "
+                          f"{ev['value_before']:.3f} → {ev['value_after']:.3f}")
+                    print(f"    {ev['message']}")
+                print(hr())
+
+        elif low == "retrain":
+            print(col("  Retraining PyTorch LSTM model from FeatureStore...", DM))
+            res = brain.dl_retrainer.retrain_from_store(min_samples=25, epochs=3)
+            if res.get("status") == "completed":
+                print(col(f"  Retraining complete: {res['samples_trained']} samples, Loss={res['avg_loss']}", G))
+            else:
+                print(col(f"  Retraining skipped: {res.get('reason', 'unknown')}", Y))
+
+        elif low in ("news_scan", "scrape_news"):
+            print(col("  Running 4x daily FinBERT news scrape cycle...", DM))
+            try:
+                from news.rss_scraper import RSSNewsScraper
+                sc = RSSNewsScraper(feature_store=brain.feature_store)
+                res = sc.scrape_and_process()
+                print(col(f"  Scrape finished: {res['new_articles_count']} new articles, "
+                          f"{res['tickers_updated']} tickers updated.", G))
+            except Exception as e:
+                print(col(f"  Scrape failed: {e}", R))
+
         elif low.startswith("model "):
             llm.model = user[6:].strip()
             print(col(f"  Model: {llm.model}", G))
@@ -729,12 +793,13 @@ def repl(args, analyzer, brain, llm, mem, tracker,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="ARGUS V4")
-    parser.add_argument("image",     nargs="?", default=None)
-    parser.add_argument("--no-live", action="store_true")
-    parser.add_argument("--train",   action="store_true")
-    parser.add_argument("--watch",   default=None, metavar="FOLDER")
-    parser.add_argument("--model",   default=None)
+    parser = argparse.ArgumentParser(description="ARGUS V5 — ML/DL Trading Intelligence")
+    parser.add_argument("image",       nargs="?", default=None)
+    parser.add_argument("--no-live",   action="store_true")
+    parser.add_argument("--train",     action="store_true")
+    parser.add_argument("--backtest",  action="store_true", help="Run walk-forward validation")
+    parser.add_argument("--watch",     default=None, metavar="FOLDER")
+    parser.add_argument("--model",     default=None)
     args = parser.parse_args()
 
     state = load_state()
@@ -762,6 +827,22 @@ def main():
         folder=state.get("watch_folder", WATCH_FOLDER),
         callback=_auto_analyze,
     )
+
+    if args.backtest:
+        from evaluation.backtest import WalkForwardBacktest, print_backtest_report
+        import yfinance as yf
+        ticker = "RELIANCE.NS"
+        print(col(f"Running ARGUS V5 Walk-Forward Backtest on {ticker}...", C))
+        df = yf.download(ticker, period="1mo", interval="5m", progress=False, auto_adjust=True)
+        if df is None or len(df) < 100:
+            df = yf.download(ticker, period="5d", interval="5m", progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df.dropna()
+        engine = WalkForwardBacktest()
+        rpt = engine.run(df, ticker=ticker, warmup_bars=60)
+        print_backtest_report(rpt, ticker)
+        return
 
     if args.train:
         print_banner(False)

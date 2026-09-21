@@ -17,6 +17,20 @@ class CVResult:
     consolidation: bool
 
 
+@dataclass
+class CVAnalysisResult:
+    trend_direction: str
+    trend_strength: str
+    support_zones: list = field(default_factory=list)
+    resistance_zones: list = field(default_factory=list)
+    candle_bodies: list = field(default_factory=list)
+    volume_profile: str = "flat"
+    volatility: str = "moderate"
+    breakout_structure: Optional[str] = None
+    ema_cross: Optional[str] = None
+    consolidation_detected: bool = False
+
+
 class CVAnalyzer:
     def analyze(self, processed) -> CVResult:
         h, w = processed.gray.shape

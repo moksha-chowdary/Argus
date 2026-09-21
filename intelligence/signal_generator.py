@@ -129,7 +129,7 @@ class SignalGenerator:
             and s.momentum in ("weakening", "weak")
         )
 
-        if near_resistance and abs(diff) < 2.0:
+        if near_resistance and abs(diff) <= 2.0:
             return "WAIT", "moderate"
 
         if diff >= 3.0:

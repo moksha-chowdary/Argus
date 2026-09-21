@@ -15,6 +15,9 @@ class ProcessedImage:
     filepath: Optional[str] = None
 
 
+PreprocessedImage = ProcessedImage
+
+
 class ImagePreprocessor:
     TARGET_WIDTH = 1280
 

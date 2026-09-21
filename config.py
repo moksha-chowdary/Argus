@@ -57,5 +57,5 @@ BANNER = r"""
   / /| | / /_/ / / __  / / / /\__ \ 
  / ___ |/ _, _/ /_/ / / /_/ /___/ / 
 /_/  |_/_/ |_|\____/  \____//____/  
-              V4  —  NSE Intelligence
+              V5  —  ML/DL Trading Intelligence
 """
