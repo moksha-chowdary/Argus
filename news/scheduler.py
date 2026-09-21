@@ -57,6 +57,16 @@ class NewsScheduler:
         self.scheduler.start()
         self._is_running = True
 
+    @property
+    def running(self) -> bool:
+        return self._is_running
+
+    def get_jobs(self):
+        return self.scheduler.get_jobs()
+
+    def shutdown(self, wait: bool = False):
+        self.stop()
+
     def stop(self):
         """Stop the background scheduler."""
         if self._is_running:
@@ -76,3 +86,12 @@ class NewsScheduler:
             "scheduled_hours": [8, 10, 12, 14],
             "last_run_result": self._last_run_result,
         }
+
+
+def start_news_scheduler(scraper: Optional[RSSNewsScraper] = None, feature_store=None) -> NewsScheduler:
+    """Factory helper to start the 4x daily news scheduler."""
+    if scraper is None and feature_store is not None:
+        scraper = RSSNewsScraper(feature_store=feature_store)
+    scheduler = NewsScheduler(scraper=scraper)
+    scheduler.start()
+    return scheduler

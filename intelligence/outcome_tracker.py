@@ -42,6 +42,44 @@ class OutcomeTracker:
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
         self.horizon_minutes = horizon_minutes
+        self._bg_thread = None
+        self._stop_bg = False
+
+    def start_background_tracker(self, interval_sec: int = 30):
+        """Starts a persistent background thread that polls and resolves pending T+5 predictions."""
+        if self._bg_thread and self._bg_thread.is_alive():
+            return
+
+        import threading
+        import time
+        import yfinance as yf
+
+        def default_price_lookup(symbol: str) -> Optional[float]:
+            try:
+                t = yf.Ticker(symbol)
+                hist = t.history(period="1d", interval="5m")
+                if not hist.empty:
+                    return float(hist["Close"].iloc[-1])
+            except Exception:
+                pass
+            return None
+
+        def _loop():
+            while not self._stop_bg:
+                try:
+                    self.check_and_resolve_pending(price_lookup_fn=default_price_lookup)
+                except Exception:
+                    pass
+                time.sleep(interval_sec)
+
+        self._stop_bg = False
+        self._bg_thread = threading.Thread(target=_loop, daemon=True, name="argus_outcome_tracker")
+        self._bg_thread.start()
+
+    def stop_background_tracker(self):
+        """Stops the background outcome tracker thread."""
+        self._stop_bg = True
+
 
     # ── Prediction Phase (Time T) ─────────────────────────────────────────────
 

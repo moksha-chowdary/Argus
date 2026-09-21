@@ -1,1 +1,1 @@
-# ARGUS API Layer
+"""ARGUS V5 REST API & WebSocket Streaming Service"""

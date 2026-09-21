@@ -244,8 +244,92 @@ ARGUS/
 
 ---
 
+## Production Deployment Architecture (Decoupled Vercel + Railway)
+
+ARGUS V5 is architected as an independently deployable, API-first system separating the user presentation layer from the continuous machine learning backend.
+
+```mermaid
+flowchart LR
+    subgraph FRONTEND ["Frontend Layer (Vercel)"]
+        V1["Next.js / Vite React Dashboard"]
+        V2["Recharts / Chart.js Interactive Canvas"]
+        V3["WebSocket / SSE Stream Listener"]
+        V1 --- V2
+        V1 --- V3
+    end
+
+    subgraph NETWORK ["Secure TLS / Network"]
+        ENV["NEXT_PUBLIC_API_URL / VITE_API_URL"]
+        CORS["FastAPI CORSMiddleware"]
+    end
+
+    subgraph BACKEND ["Backend Service (Railway.app)"]
+        F1["FastAPI Application (api/main.py)"]
+        F2["Persistent In-Memory OnlineLearner (River HAT)"]
+        F3["Persistent Background APScheduler (News Scraper)"]
+        F4["Outcome Resolution Worker Thread (T+5min)"]
+        F1 --- F2
+        F1 --- F3
+        F1 --- F4
+    end
+
+    subgraph PERSISTENCE ["Managed Persistence (Railway)"]
+        P1[("Managed PostgreSQL Database")]
+        P2[("Persistent Volume Disk (/data)")]
+    end
+
+    FRONTEND <-->|REST & WebSocket| NETWORK
+    NETWORK <--> BACKEND
+    BACKEND <--> PERSISTENCE
+```
+
+### 1. Deployment Split & Platform Justification
+
+| Layer | Hosting Provider | Justification |
+| :--- | :--- | :--- |
+| **Frontend** | **Vercel** | Instant global edge CDN, zero-config Next.js/Vite deployment, fast TTFB, automatic preview environments, and seamless Git-based CI/CD. |
+| **Backend** | **Railway** *(Recommended)* | **Continuous Process Architecture**: Unlike Vercel Serverless (which freezes execution and kills in-memory state), Railway provides dedicated, always-on container instances. This is **strictly mandatory** for ARGUS V5 to run continuous River stream updates, maintain live WebSocket subscriptions, and run the APScheduler background daemon without timeout interruption. Railway also provisions managed PostgreSQL with zero-config connection string injection. |
+
+### 2. Backend REST & WebSocket Endpoints (`api/main.py`)
+
+| Method | Route | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/health` | Health check: verifies DB connectivity, APScheduler daemon status, online learner samples seen, and last prediction/outcome timestamps. |
+| `GET` | `/api/signals/{ticker}` | Generates real-time probabilistic signal, calibrated $P(\text{Up})$, confidence band, pricing targets, technicals, and auditable reasoning. |
+| `GET` | `/api/predictions/history` | Returns historical predictions with matched T+5 realized outcomes and trading PnL. |
+| `GET` | `/api/backtest/{ticker}` | Exports auditable walk-forward metrics and full time-series chart data (equity curve, rolling accuracy, calibration) as JSON for frontend charting. |
+| `GET` | `/api/drift-events` | Returns recent ADWIN concept drift detections. |
+| `GET` | `/api/news/sentiment/{ticker}` | Point-in-time FinBERT sentiment scores and news history. |
+| `WS` | `/ws/signals/{ticker}` | Real-time WebSocket stream pushing new signal updates to active frontend clients. |
+| `GET` | `/api/stream/signals` | Server-Sent Events (SSE) stream fallback for environments where WebSockets are restricted. |
+
+### 3. Environment Variable Configuration
+
+#### Frontend Environment (`.env.production` on Vercel):
+```bash
+# Point directly to your persistent Railway backend domain
+NEXT_PUBLIC_API_URL=https://argus-backend.up.railway.app
+# If using Vite:
+# VITE_API_URL=https://argus-backend.up.railway.app
+```
+
+#### Backend Environment (Railway Dashboard Variables):
+```bash
+# Server Port & Host
+PORT=8000
+HOST=0.0.0.0
+
+# Database URL (Automatically provisioned when adding PostgreSQL on Railway)
+DATABASE_URL=postgresql://postgres:password@roundhouse.proxy.rlwy.net:5432/railway
+
+# Allowed CORS Origins (Include your Vercel production domain and local dev)
+CORS_ORIGINS=https://argus-intelligence.vercel.app,http://localhost:3000,http://localhost:5173
+```
+
+---
+
 ## Engineering Standards & Methodological Integrity
 
 1. **Strict Lookahead Protection**: Financial time-series models often report unrealistically high performance due to subtle future leakage (e.g. fitting scalers across the full dataset, centering moving averages, or querying news published after the decision time). ARGUS V5 enforces timestamp isolation at the database layer.
-2. **Defensible Metrics**: No overfitted claims of 90% accuracy. The 57.41% directional accuracy achieved by the River online learner across 1,376 intraday bars is statistically validated ($p < 0.0001$) and maintains profitability post-slippage.
-3. **Production Modularity**: Every module operates independently with graceful fallbacks (e.g., CPU PyTorch fallback, financial lexicon fallback if offline, and chart vision fallback when live candle feeds are unavailable).
+2. **Defensible Metrics**: Intraday financial price action is heavily noise-dominated ($R^2 < 1\%$). Directional accuracies between 53% and 57% represent defensible statistical edges. Annualized Sharpe/Sortino ratios are strictly guarded and require $\ge 40$ trading days ($\ge 3,000$ bars).
+3. **Production Modularity**: The universal database layer (`data/db.py`) dynamically switches between SQLite locally and managed PostgreSQL in production without code modification.
