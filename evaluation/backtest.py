@@ -83,6 +83,7 @@ class WalkForwardBacktest:
         self.lstm_retrain_interval = lstm_retrain_interval
         self.rf_annual = risk_free_rate_annual
         self.min_bars_for_annualization = min_bars_for_annualization
+        self.feature_store = FeatureStore()
 
     def run(
         self,
@@ -153,7 +154,8 @@ class WalkForwardBacktest:
             sub_df = clean_df.iloc[: i + 1]
             try:
                 feats, asof, daily_asof = calculate_numeric_features(
-                    sub_df, ticker, daily_df=daily_df, nifty_df=nifty_df, sector_df=sector_df
+                    sub_df, ticker, feature_store=self.feature_store, sector=sec_name,
+                    daily_df=daily_df, nifty_df=nifty_df, sector_df=sector_df
                 )
                 y_next = 1 if clean_df["Close"].iloc[i + 1] > clean_df["Close"].iloc[i] else 0
                 online_learner.learn_one(feats, y_next)
@@ -177,7 +179,8 @@ class WalkForwardBacktest:
 
             # 1. Zero-Lookahead Feature Extraction (asof = t)
             feats, asof, daily_asof = calculate_numeric_features(
-                sub_df, ticker, daily_df=daily_df, nifty_df=nifty_df, sector_df=sector_df
+                sub_df, ticker, feature_store=self.feature_store, sector=sec_name,
+                daily_df=daily_df, nifty_df=nifty_df, sector_df=sector_df
             )
             feat_vec = [feats[c] for c in FEATURE_COLUMNS]
             feature_history.append(feat_vec)
@@ -634,7 +637,8 @@ class WalkForwardBacktest:
         for t in range(25, n - 1):
             sub = clean_df.iloc[: t + 1]
             feats, _, _ = calculate_numeric_features(
-                sub, ticker, daily_df=daily_df, nifty_df=nifty_df, sector_df=sector_df
+                sub, ticker, feature_store=self.feature_store, sector=sec_name,
+                daily_df=daily_df, nifty_df=nifty_df, sector_df=sector_df
             )
             y = 1 if clean_df["Close"].iloc[t + 1] > clean_df["Close"].iloc[t] else 0
             feats_list.append(feats)

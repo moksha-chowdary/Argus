@@ -346,9 +346,11 @@ def calculate_numeric_features(
     sent_delta = 0.0
     sent_age_min = 1440.0  # default 24h decay
 
+    resolved_sector = sector or TICKER_SECTORS.get(ticker.upper(), TICKER_SECTORS.get(ticker.upper().replace(".NS", ""), None))
+
     if feature_store is not None:
         raw_sent = feature_store.get_latest_sentiment(
-            ticker=ticker, sector=sector, asof_time=features_asof
+            ticker=ticker, sector=resolved_sector, asof_time=features_asof
         )
         sent_score = float(raw_sent.get("sentiment_score", 0.0))
         sent_delta = float(raw_sent.get("sentiment_delta", 0.0))

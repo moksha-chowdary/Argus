@@ -235,10 +235,13 @@ class FeatureStore:
         with self._lock, self._get_session() as session:
             row = None
             if ticker:
+                raw_sym = ticker.upper()
+                clean_sym = raw_sym.replace(".NS", "")
+                ticker_variants = [raw_sym, clean_sym, f"{clean_sym}.NS"]
                 row = (
                     session.query(SentimentRecord)
                     .filter(
-                        SentimentRecord.ticker == ticker.upper(),
+                        SentimentRecord.ticker.in_(ticker_variants),
                         SentimentRecord.timestamp <= str(asof_time),
                     )
                     .order_by(desc(SentimentRecord.timestamp))
