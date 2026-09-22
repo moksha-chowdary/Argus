@@ -17,6 +17,38 @@ import pandas as pd
 from data.feature_store import FeatureStore
 from data.multi_timeframe import fetch_daily_context
 
+TICKER_SECTORS = {
+    "RELIANCE.NS": "ENERGY",
+    "RELIANCE": "ENERGY",
+    "TCS.NS": "IT",
+    "TCS": "IT",
+    "INFY.NS": "IT",
+    "INFY": "IT",
+    "WIPRO.NS": "IT",
+    "WIPRO": "IT",
+    "HDFCBANK.NS": "BANKING",
+    "HDFCBANK": "BANKING",
+    "ICICIBANK.NS": "BANKING",
+    "ICICIBANK": "BANKING",
+    "SBIN.NS": "BANKING",
+    "SBIN": "BANKING",
+    "BAJFINANCE.NS": "NBFC",
+    "BAJFINANCE": "NBFC",
+    "SUNPHARMA.NS": "PHARMA",
+    "SUNPHARMA": "PHARMA",
+    "LT.NS": "INFRASTRUCTURE",
+    "LT": "INFRASTRUCTURE",
+}
+
+SECTOR_INDICES = {
+    "ENERGY": "^CNXENERGY",
+    "IT": "^CNXIT",
+    "BANKING": "^NSEBANK",
+    "NBFC": "^CNXFIN",
+    "PHARMA": "^CNXPHARMA",
+    "INFRASTRUCTURE": "^CNXINFRA",
+}
+
 
 def calculate_numeric_features(
     df: pd.DataFrame,
@@ -25,6 +57,8 @@ def calculate_numeric_features(
     feature_store: Optional[FeatureStore] = None,
     sector: Optional[str] = None,
     daily_df: Optional[pd.DataFrame] = None,
+    nifty_df: Optional[pd.DataFrame] = None,
+    sector_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[Dict[str, float], str, str]:
     """
     Extracts continuous numeric features from OHLCV data up to asof_timestamp.
@@ -100,6 +134,92 @@ def calculate_numeric_features(
     ret_3 = safe_log_return(3)
     ret_5 = safe_log_return(5)
     ret_15 = safe_log_return(15)
+
+    # ── 1b. Cross-Sectional / Relative Market & Sector Returns ─────────────────
+    rel_nifty_ret_1 = 0.0
+    rel_nifty_ret_3 = 0.0
+    rel_nifty_ret_5 = 0.0
+    rel_nifty_ret_15 = 0.0
+    nifty_divergence_flag = 0.5
+
+    nifty_series = None
+    if nifty_df is not None:
+        nifty_series = nifty_df["Close"].astype(float) if "Close" in nifty_df.columns else None
+    else:
+        try:
+            from data.multi_timeframe import fetch_intraday_series
+            n_raw = fetch_intraday_series("^NSEI", period="60d", interval="15m")
+            if n_raw is not None and not n_raw.empty and "Close" in n_raw.columns:
+                nifty_series = n_raw["Close"].astype(float)
+        except Exception:
+            nifty_series = None
+
+    if nifty_series is not None and len(nifty_series) > 0:
+        if clean_df.index.tz is not None and nifty_series.index.tz is None:
+            nifty_series = nifty_series.tz_localize(clean_df.index.tz)
+        elif clean_df.index.tz is None and nifty_series.index.tz is not None:
+            nifty_series = nifty_series.tz_convert(None)
+
+        nifty_sub = nifty_series[nifty_series.index <= clean_df.index[-1]]
+        if len(nifty_sub) > 0:
+            n_curr = float(nifty_sub.iloc[-1])
+            def safe_nifty_log_ret(k: int) -> float:
+                if len(nifty_sub) > k and float(nifty_sub.iloc[-k-1]) > 0:
+                    return float(np.log(n_curr / float(nifty_sub.iloc[-k-1])))
+                return 0.0
+
+            r_n_1 = safe_nifty_log_ret(1)
+            r_n_3 = safe_nifty_log_ret(3)
+            r_n_5 = safe_nifty_log_ret(5)
+            r_n_15 = safe_nifty_log_ret(15)
+
+            rel_nifty_ret_1 = ret_1 - r_n_1
+            rel_nifty_ret_3 = ret_3 - r_n_3
+            rel_nifty_ret_5 = ret_5 - r_n_5
+            rel_nifty_ret_15 = ret_15 - r_n_15
+
+            if (ret_1 * r_n_1) < 0:
+                nifty_divergence_flag = 1.0  # Divergent (moving against index)
+            elif (ret_1 * r_n_1) > 0:
+                nifty_divergence_flag = 0.0  # Moving with index
+            else:
+                nifty_divergence_flag = 0.5  # Neutral / flat
+
+    sec_name = sector or TICKER_SECTORS.get(ticker.upper(), TICKER_SECTORS.get(ticker.upper().replace(".NS", ""), "MARKET"))
+    sec_sym = SECTOR_INDICES.get(sec_name, "^NSEI")
+
+    rel_sector_ret_1 = 0.0
+    rel_sector_ret_5 = 0.0
+    sec_series = None
+    if sector_df is not None:
+        sec_series = sector_df["Close"].astype(float) if "Close" in sector_df.columns else None
+    else:
+        try:
+            from data.multi_timeframe import fetch_intraday_series
+            s_raw = fetch_intraday_series(sec_sym, period="60d", interval="15m")
+            if s_raw is not None and not s_raw.empty and "Close" in s_raw.columns:
+                sec_series = s_raw["Close"].astype(float)
+        except Exception:
+            sec_series = None
+
+    if sec_series is not None and len(sec_series) > 0:
+        if clean_df.index.tz is not None and sec_series.index.tz is None:
+            sec_series = sec_series.tz_localize(clean_df.index.tz)
+        elif clean_df.index.tz is None and sec_series.index.tz is not None:
+            sec_series = sec_series.tz_convert(None)
+
+        sec_sub = sec_series[sec_series.index <= clean_df.index[-1]]
+        if len(sec_sub) > 0:
+            s_curr = float(sec_sub.iloc[-1])
+            def safe_sec_log_ret(k: int) -> float:
+                if len(sec_sub) > k and float(sec_sub.iloc[-k-1]) > 0:
+                    return float(np.log(s_curr / float(sec_sub.iloc[-k-1])))
+                return 0.0
+
+            r_s_1 = safe_sec_log_ret(1)
+            r_s_5 = safe_sec_log_ret(5)
+            rel_sector_ret_1 = ret_1 - r_s_1
+            rel_sector_ret_5 = ret_5 - r_s_5
 
     # ── 2. Volatility & Price Action Dynamics ─────────────────────────────────
     # True Range (TR) & Average True Range (ATR 14)
@@ -229,6 +349,13 @@ def calculate_numeric_features(
         "ret_3": round(ret_3, 6),
         "ret_5": round(ret_5, 6),
         "ret_15": round(ret_15, 6),
+        "rel_nifty_ret_1": round(rel_nifty_ret_1, 6),
+        "rel_nifty_ret_3": round(rel_nifty_ret_3, 6),
+        "rel_nifty_ret_5": round(rel_nifty_ret_5, 6),
+        "rel_nifty_ret_15": round(rel_nifty_ret_15, 6),
+        "rel_sector_ret_1": round(rel_sector_ret_1, 6),
+        "rel_sector_ret_5": round(rel_sector_ret_5, 6),
+        "nifty_divergence_flag": round(nifty_divergence_flag, 4),
         "norm_atr": round(norm_atr, 6),
         "rolling_std_10": round(rolling_std_10, 6),
         "body_pct": round(body_pct, 4),
@@ -279,6 +406,10 @@ def calculate_numeric_features(
 FAST_INTRADAY_FEATURES = [
     # Multi-lag log returns (on 15m candles: 15m, 45m, 75m, 225m momentum)
     "ret_1", "ret_3", "ret_5", "ret_15",
+    # Cross-sectional / Relative market & sector features
+    "rel_nifty_ret_1", "rel_nifty_ret_3", "rel_nifty_ret_5", "rel_nifty_ret_15",
+    "rel_sector_ret_1", "rel_sector_ret_5",
+    "nifty_divergence_flag",
     # Volatility & candle geometry
     "norm_atr", "rolling_std_10", "body_pct", "upper_wick_pct", "lower_wick_pct",
     # Oscillators

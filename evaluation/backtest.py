@@ -141,12 +141,20 @@ class WalkForwardBacktest:
 
         # Pre-cache daily OHLCV bars for multi-timeframe context
         daily_df = get_cached_daily_bars(ticker)
+        from data.multi_timeframe import fetch_intraday_series
+        from intelligence.features import TICKER_SECTORS, SECTOR_INDICES
+        nifty_df = fetch_intraday_series("^NSEI", period="60d", interval="15m")
+        sec_name = TICKER_SECTORS.get(ticker.upper(), TICKER_SECTORS.get(ticker.upper().replace(".NS", ""), "MARKET"))
+        sec_sym = SECTOR_INDICES.get(sec_name, "^NSEI")
+        sector_df = fetch_intraday_series(sec_sym, period="60d", interval="15m")
 
         # Warm-up phase
         for i in range(25, warmup_bars):
             sub_df = clean_df.iloc[: i + 1]
             try:
-                feats, asof, daily_asof = calculate_numeric_features(sub_df, ticker, daily_df=daily_df)
+                feats, asof, daily_asof = calculate_numeric_features(
+                    sub_df, ticker, daily_df=daily_df, nifty_df=nifty_df, sector_df=sector_df
+                )
                 y_next = 1 if clean_df["Close"].iloc[i + 1] > clean_df["Close"].iloc[i] else 0
                 online_learner.learn_one(feats, y_next)
                 feature_history.append([feats[c] for c in FEATURE_COLUMNS])
@@ -168,7 +176,9 @@ class WalkForwardBacktest:
             curr_time = clean_df.index[t]
 
             # 1. Zero-Lookahead Feature Extraction (asof = t)
-            feats, asof, daily_asof = calculate_numeric_features(sub_df, ticker, daily_df=daily_df)
+            feats, asof, daily_asof = calculate_numeric_features(
+                sub_df, ticker, daily_df=daily_df, nifty_df=nifty_df, sector_df=sector_df
+            )
             feat_vec = [feats[c] for c in FEATURE_COLUMNS]
             feature_history.append(feat_vec)
 
@@ -612,12 +622,20 @@ class WalkForwardBacktest:
         clean_df = df.copy().sort_index()
         n = len(clean_df)
         daily_df = get_cached_daily_bars(ticker)
+        from data.multi_timeframe import fetch_intraday_series
+        from intelligence.features import TICKER_SECTORS, SECTOR_INDICES
+        nifty_df = fetch_intraday_series("^NSEI", period="60d", interval="15m")
+        sec_name = TICKER_SECTORS.get(ticker.upper(), TICKER_SECTORS.get(ticker.upper().replace(".NS", ""), "MARKET"))
+        sec_sym = SECTOR_INDICES.get(sec_name, "^NSEI")
+        sector_df = fetch_intraday_series(sec_sym, period="60d", interval="15m")
 
         feats_list = []
         y_true_list = []
         for t in range(25, n - 1):
             sub = clean_df.iloc[: t + 1]
-            feats, _, _ = calculate_numeric_features(sub, ticker, daily_df=daily_df)
+            feats, _, _ = calculate_numeric_features(
+                sub, ticker, daily_df=daily_df, nifty_df=nifty_df, sector_df=sector_df
+            )
             y = 1 if clean_df["Close"].iloc[t + 1] > clean_df["Close"].iloc[t] else 0
             feats_list.append(feats)
             y_true_list.append(y)

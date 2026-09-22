@@ -75,7 +75,9 @@ def test_feature_engineering_strict_asof():
     feats, asof, daily_asof = calculate_numeric_features(df, ticker="TEST.NS", asof_timestamp=cutoff_time)
 
     assert len(feats) == len(FEATURE_COLUMNS)
-    assert len(feats) == 40
+    assert "rel_nifty_ret_1" in feats
+    assert "rel_sector_ret_1" in feats
+    assert "nifty_divergence_flag" in feats
     assert asof == cutoff_time.isoformat()
     assert daily_asof is not None
     # Verify daily context features exist
