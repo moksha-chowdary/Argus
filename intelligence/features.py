@@ -221,6 +221,31 @@ def calculate_numeric_features(
             rel_sector_ret_1 = ret_1 - r_s_1
             rel_sector_ret_5 = ret_5 - r_s_5
 
+    # ── 1c. Multi-Feature Intraday Session-Relative Returns ───────────────────
+    # Computed relative to the session opening price (09:15 AM candle)
+    # Strictly zero lookahead: only uses session bars observed today up to current bar t.
+    eps = 1e-8
+    curr_date = last_candle_time.date() if hasattr(last_candle_time, "date") else pd.to_datetime(last_candle_time).date()
+    if hasattr(clean_df.index, "date"):
+        today_mask = clean_df.index.date == curr_date
+    else:
+        today_mask = pd.to_datetime(clean_df.index).date == curr_date
+    today_candles = clean_df[today_mask]
+
+    if len(today_candles) > 0:
+        session_open = float(today_candles["Open"].iloc[0])
+        session_high = float(today_candles["High"].max())
+        session_low = float(today_candles["Low"].min())
+    else:
+        session_open = curr_open
+        session_high = curr_high
+        session_low = curr_low
+
+    ret_open_to_now = float(np.log(curr_close / (session_open + eps)))
+    ret_session_open_bar = float(np.log(curr_open / (session_open + eps)))
+    ret_session_high = float(np.log(session_high / (session_open + eps)))
+    ret_session_low = float(np.log(session_low / (session_open + eps)))
+
     # ── 2. Volatility & Price Action Dynamics ─────────────────────────────────
     # True Range (TR) & Average True Range (ATR 14)
     prev_close = close.shift(1)
@@ -349,6 +374,10 @@ def calculate_numeric_features(
         "ret_3": round(ret_3, 6),
         "ret_5": round(ret_5, 6),
         "ret_15": round(ret_15, 6),
+        "ret_open_to_now": round(ret_open_to_now, 6),
+        "ret_session_open_bar": round(ret_session_open_bar, 6),
+        "ret_session_high": round(ret_session_high, 6),
+        "ret_session_low": round(ret_session_low, 6),
         "rel_nifty_ret_1": round(rel_nifty_ret_1, 6),
         "rel_nifty_ret_3": round(rel_nifty_ret_3, 6),
         "rel_nifty_ret_5": round(rel_nifty_ret_5, 6),
@@ -406,6 +435,8 @@ def calculate_numeric_features(
 FAST_INTRADAY_FEATURES = [
     # Multi-lag log returns (on 15m candles: 15m, 45m, 75m, 225m momentum)
     "ret_1", "ret_3", "ret_5", "ret_15",
+    # Multi-feature intraday session returns (open-to-now, session-relative, running extremes)
+    "ret_open_to_now", "ret_session_open_bar", "ret_session_high", "ret_session_low",
     # Cross-sectional / Relative market & sector features
     "rel_nifty_ret_1", "rel_nifty_ret_3", "rel_nifty_ret_5", "rel_nifty_ret_15",
     "rel_sector_ret_1", "rel_sector_ret_5",

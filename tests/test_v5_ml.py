@@ -75,6 +75,8 @@ def test_feature_engineering_strict_asof():
     feats, asof, daily_asof = calculate_numeric_features(df, ticker="TEST.NS", asof_timestamp=cutoff_time)
 
     assert len(feats) == len(FEATURE_COLUMNS)
+    assert "ret_open_to_now" in feats
+    assert "ret_session_open_bar" in feats
     assert "rel_nifty_ret_1" in feats
     assert "rel_sector_ret_1" in feats
     assert "nifty_divergence_flag" in feats
