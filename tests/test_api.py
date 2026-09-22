@@ -34,7 +34,7 @@ def test_api_health_check(client):
     assert data["database"]["reachable"] is True
     assert "scheduler" in data
     assert "online_learner" in data
-    assert data["online_learner"]["model_type"] == "HoeffdingAdaptiveTreeClassifier"
+    assert data["online_learner"]["model_type"] == "ARFClassifier"
     assert "telemetry" in data
 
 

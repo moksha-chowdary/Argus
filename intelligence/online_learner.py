@@ -10,7 +10,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple
 
-from river import tree, preprocessing, drift, metrics
+from river import forest, preprocessing, drift, metrics
 from config import BASE_DIR
 from data.feature_store import FeatureStore
 
@@ -20,9 +20,9 @@ DEFAULT_ONLINE_MODEL_PATH = os.path.join(DEFAULT_MODEL_DIR, "online_learner.pkl"
 
 class OnlineLearner:
     """
-    Incremental ML classifier for continuous 5-minute directional market prediction.
+    Incremental ML classifier for continuous 15-minute directional market prediction.
     Features:
-    - Incremental Hoeffding Adaptive Tree (HAT) robust to non-stationary streams
+    - Incremental Adaptive Random Forest (ARF) ensemble robust to non-stationary streams
     - Online standard scaling of incoming numerical features
     - ADWIN (Adaptive Windowing) concept drift detection on classification error
     - Real-time calibration tracking via Brier Score and Rolling Accuracy
@@ -35,22 +35,26 @@ class OnlineLearner:
         feature_store: Optional[FeatureStore] = None,
         grace_period: int = 50,
         adwin_delta: float = 0.002,
+        n_models: int = 10,
     ):
         self.model_path = model_path
         self.feature_store = feature_store or FeatureStore()
         self.grace_period = grace_period
         self.adwin_delta = adwin_delta
+        self.n_models = n_models
 
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
 
-        # Pipeline: Online Scaler -> Hoeffding Adaptive Tree Classifier (Naive Bayes Adaptive leaves)
-        self.pipeline = preprocessing.StandardScaler() | tree.HoeffdingAdaptiveTreeClassifier(
+        # Pipeline: Online Scaler -> Adaptive Random Forest Classifier (Naive Bayes Adaptive leaves)
+        self.pipeline = preprocessing.StandardScaler() | forest.ARFClassifier(
+            n_models=self.n_models,
             grace_period=self.grace_period,
             split_criterion="gini",
             delta=1e-5,
             tau=0.05,
             leaf_prediction="nba",  # Naive Bayes Adaptive for discriminating probabilities
+            seed=42,
         )
 
         # ADWIN drift monitor on absolute prediction error
@@ -212,7 +216,7 @@ class OnlineLearner:
         """Return diagnostic health and performance telemetry."""
         with self._lock:
             return {
-                "model_type": "River HoeffdingAdaptiveTreeClassifier + StandardScaler",
+                "model_type": "River ARFClassifier (Adaptive Random Forest) + StandardScaler",
                 "samples_seen": self.samples_seen,
                 "accuracy": round(float(self.accuracy_metric.get()), 4) if self.samples_seen > 0 else 0.5,
                 "brier_score": round(float(self.brier_metric.get()), 4) if self.samples_seen > 0 else 0.25,

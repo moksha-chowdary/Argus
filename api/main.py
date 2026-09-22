@@ -155,7 +155,7 @@ def get_health() -> Dict[str, Any]:
             "jobs": [j.name for j in app.state.news_scheduler.get_jobs()] if scheduler_running else [],
         },
         "online_learner": {
-            "model_type": "HoeffdingAdaptiveTreeClassifier",
+            "model_type": "ARFClassifier",
             "samples_seen": app.state.online_learner.samples_seen,
             "drifts_detected": app.state.online_learner.drift_count,
         },

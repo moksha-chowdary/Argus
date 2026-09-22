@@ -111,16 +111,27 @@ class WalkForwardBacktest:
         clean_df = df.copy().sort_index()
         n_bars = len(clean_df)
 
-        # Isolated model instances
-        online_learner = OnlineLearner(
-            model_path=os.path.join(EVAL_OUTPUT_DIR, f"eval_online_{ticker.replace('.NS', '')}.pkl")
-        )
+        # Isolated model instances: ensure fresh models for rolling-origin walk-forward evaluation
+        online_path = os.path.join(EVAL_OUTPUT_DIR, f"eval_online_{ticker.replace('.NS', '')}.pkl")
+        if os.path.exists(online_path):
+            try:
+                os.remove(online_path)
+            except Exception:
+                pass
+        online_learner = OnlineLearner(model_path=online_path)
+
         dl_retrainer = None
         if run_dl:
+            dl_path = os.path.join(EVAL_OUTPUT_DIR, f"eval_lstm_{ticker.replace('.NS', '')}.pt")
+            if os.path.exists(dl_path):
+                try:
+                    os.remove(dl_path)
+                except Exception:
+                    pass
             dl_retrainer = DeepLearningRetrainer(
                 input_dim=len(FEATURE_COLUMNS),
                 seq_len=15,
-                model_path=os.path.join(EVAL_OUTPUT_DIR, f"eval_lstm_{ticker.replace('.NS', '')}.pt"),
+                model_path=dl_path,
             )
 
         records = []
@@ -616,8 +627,14 @@ class WalkForwardBacktest:
         y_shuffled = np.random.permutation(y_true_list)
 
         # Run online learner on shuffled targets
+        shuffle_model_path = os.path.join(EVAL_OUTPUT_DIR, "eval_shuffle_test.pkl")
+        if os.path.exists(shuffle_model_path):
+            try:
+                os.remove(shuffle_model_path)
+            except Exception:
+                pass
         learner = OnlineLearner(
-            model_path=os.path.join(EVAL_OUTPUT_DIR, "eval_shuffle_test.pkl")
+            model_path=shuffle_model_path
         )
         preds = []
         for f, y_shuf in zip(feats_list[warmup_bars:], y_shuffled[warmup_bars:]):
