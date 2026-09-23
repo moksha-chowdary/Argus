@@ -8,6 +8,7 @@ Enforces strict time-based leakage prevention:
 - Sentiment is queried strictly with timestamp <= asof_timestamp
 """
 
+import os
 import math
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple, List
@@ -16,6 +17,8 @@ import pandas as pd
 
 from data.feature_store import FeatureStore
 from data.multi_timeframe import fetch_daily_context
+
+FEATURE_STAGE = int(os.environ.get("ARGUS_FEATURE_STAGE", "4"))
 
 TICKER_SECTORS = {
     "RELIANCE.NS": "ENERGY",
@@ -348,7 +351,7 @@ def calculate_numeric_features(
 
     resolved_sector = sector or TICKER_SECTORS.get(ticker.upper(), TICKER_SECTORS.get(ticker.upper().replace(".NS", ""), None))
 
-    if feature_store is not None:
+    if FEATURE_STAGE >= 4 and feature_store is not None:
         raw_sent = feature_store.get_latest_sentiment(
             ticker=ticker, sector=resolved_sector, asof_time=features_asof
         )
@@ -376,17 +379,6 @@ def calculate_numeric_features(
         "ret_3": round(ret_3, 6),
         "ret_5": round(ret_5, 6),
         "ret_15": round(ret_15, 6),
-        "ret_open_to_now": round(ret_open_to_now, 6),
-        "ret_session_open_bar": round(ret_session_open_bar, 6),
-        "ret_session_high": round(ret_session_high, 6),
-        "ret_session_low": round(ret_session_low, 6),
-        "rel_nifty_ret_1": round(rel_nifty_ret_1, 6),
-        "rel_nifty_ret_3": round(rel_nifty_ret_3, 6),
-        "rel_nifty_ret_5": round(rel_nifty_ret_5, 6),
-        "rel_nifty_ret_15": round(rel_nifty_ret_15, 6),
-        "rel_sector_ret_1": round(rel_sector_ret_1, 6),
-        "rel_sector_ret_5": round(rel_sector_ret_5, 6),
-        "nifty_divergence_flag": round(nifty_divergence_flag, 4),
         "norm_atr": round(norm_atr, 6),
         "rolling_std_10": round(rolling_std_10, 6),
         "body_pct": round(body_pct, 4),
@@ -415,6 +407,25 @@ def calculate_numeric_features(
         "effective_sentiment": round(effective_sentiment, 4),
     }
 
+    if FEATURE_STAGE >= 2:
+        features.update({
+            "rel_nifty_ret_1": round(rel_nifty_ret_1, 6),
+            "rel_nifty_ret_3": round(rel_nifty_ret_3, 6),
+            "rel_nifty_ret_5": round(rel_nifty_ret_5, 6),
+            "rel_nifty_ret_15": round(rel_nifty_ret_15, 6),
+            "rel_sector_ret_1": round(rel_sector_ret_1, 6),
+            "rel_sector_ret_5": round(rel_sector_ret_5, 6),
+            "nifty_divergence_flag": round(nifty_divergence_flag, 4),
+        })
+
+    if FEATURE_STAGE >= 3:
+        features.update({
+            "ret_open_to_now": round(ret_open_to_now, 6),
+            "ret_session_open_bar": round(ret_session_open_bar, 6),
+            "ret_session_high": round(ret_session_high, 6),
+            "ret_session_low": round(ret_session_low, 6),
+        })
+
     # ── 8. Slow / Daily-Context Features (Multi-Timeframe Layer) ──────────────
     # Strictly enforced point-in-time leakage guard:
     # Uses completed daily candles strictly prior to the current trading date (date < T.date).
@@ -433,16 +444,10 @@ def calculate_numeric_features(
 # AUDITABLE FEATURE ARCHITECTURE: FAST INTRADAY (15m) + SLOW DAILY-CONTEXT
 # ==============================================================================
 
-# ── Fast / Intraday Features (Recomputed on each 15-minute candle bar) ────────
-FAST_INTRADAY_FEATURES = [
+# ── Base Intraday Features (Stage 1 Clean Baseline) ───────────────────────────
+BASE_INTRADAY_FEATURES = [
     # Multi-lag log returns (on 15m candles: 15m, 45m, 75m, 225m momentum)
     "ret_1", "ret_3", "ret_5", "ret_15",
-    # Multi-feature intraday session returns (open-to-now, session-relative, running extremes)
-    "ret_open_to_now", "ret_session_open_bar", "ret_session_high", "ret_session_low",
-    # Cross-sectional / Relative market & sector features
-    "rel_nifty_ret_1", "rel_nifty_ret_3", "rel_nifty_ret_5", "rel_nifty_ret_15",
-    "rel_sector_ret_1", "rel_sector_ret_5",
-    "nifty_divergence_flag",
     # Volatility & candle geometry
     "norm_atr", "rolling_std_10", "body_pct", "upper_wick_pct", "lower_wick_pct",
     # Oscillators
@@ -458,6 +463,25 @@ FAST_INTRADAY_FEATURES = [
     # Point-in-time news sentiment
     "sentiment_score", "sentiment_delta", "effective_sentiment",
 ]
+
+# ── Cross-Sectional Features (Stage 2) ─────────────────────────────────────────
+CROSS_SECTIONAL_FEATURES = [
+    "rel_nifty_ret_1", "rel_nifty_ret_3", "rel_nifty_ret_5", "rel_nifty_ret_15",
+    "rel_sector_ret_1", "rel_sector_ret_5",
+    "nifty_divergence_flag",
+]
+
+# ── Session-Relative Return Features (Stage 3) ─────────────────────────────────
+SESSION_RETURN_FEATURES = [
+    "ret_open_to_now", "ret_session_open_bar", "ret_session_high", "ret_session_low",
+]
+
+if FEATURE_STAGE == 1:
+    FAST_INTRADAY_FEATURES = list(BASE_INTRADAY_FEATURES)
+elif FEATURE_STAGE == 2:
+    FAST_INTRADAY_FEATURES = list(BASE_INTRADAY_FEATURES) + list(CROSS_SECTIONAL_FEATURES)
+else:
+    FAST_INTRADAY_FEATURES = list(BASE_INTRADAY_FEATURES) + list(CROSS_SECTIONAL_FEATURES) + list(SESSION_RETURN_FEATURES)
 
 # ── Slow / Daily-Context Features (Computed once daily, held constant intraday) ─
 SLOW_DAILY_FEATURES = [

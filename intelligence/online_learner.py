@@ -5,12 +5,14 @@ Continuously updates split statistics per-sample without requiring full batch re
 """
 
 import os
+import math
 import pickle
 import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple
+import numpy as np
 
-from river import forest, preprocessing, drift, metrics
+from river import tree, forest, preprocessing, drift, metrics
 from config import BASE_DIR
 from data.feature_store import FeatureStore
 
@@ -22,8 +24,9 @@ class OnlineLearner:
     """
     Incremental ML classifier for continuous 15-minute directional market prediction.
     Features:
-    - Incremental Adaptive Random Forest (ARF) ensemble robust to non-stationary streams
+    - Incremental Hoeffding Adaptive Tree (HAT) or Adaptive Random Forest (ARF)
     - Online standard scaling of incoming numerical features
+    - Probability recalibration (Platt scaling / Isotonic regression) on held-out validation fold
     - ADWIN (Adaptive Windowing) concept drift detection on classification error
     - Real-time calibration tracking via Brier Score and Rolling Accuracy
     - Auditable model checkpointing
@@ -35,6 +38,8 @@ class OnlineLearner:
         feature_store: Optional[FeatureStore] = None,
         grace_period: int = 50,
         adwin_delta: float = 0.002,
+        model_type: Optional[str] = None,
+        calibration: Optional[str] = None,
         n_models: int = 10,
     ):
         self.model_path = model_path
@@ -43,19 +48,45 @@ class OnlineLearner:
         self.adwin_delta = adwin_delta
         self.n_models = n_models
 
+        # Architecture & calibration configuration
+        env_model = os.environ.get("ARGUS_MODEL_TYPE", "HAT").upper()
+        self.model_type = (model_type or env_model).upper()
+
+        env_calib = os.environ.get("ARGUS_CALIBRATION", "none").lower()
+        self.calibration_mode = (calibration or env_calib).lower()
+
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
 
-        # Pipeline: Online Scaler -> Adaptive Random Forest Classifier (Naive Bayes Adaptive leaves)
-        self.pipeline = preprocessing.StandardScaler() | forest.ARFClassifier(
-            n_models=self.n_models,
-            grace_period=self.grace_period,
-            split_criterion="gini",
-            delta=1e-5,
-            tau=0.05,
-            leaf_prediction="nba",  # Naive Bayes Adaptive for discriminating probabilities
-            seed=42,
-        )
+        # Pipeline: Online Scaler -> Classifier
+        if self.model_type == "ARF":
+            classifier = forest.ARFClassifier(
+                n_models=self.n_models,
+                grace_period=self.grace_period,
+                split_criterion="gini",
+                delta=1e-5,
+                tau=0.05,
+                leaf_prediction="nba",
+                seed=42,
+            )
+            self.model_name = "ARFClassifier"
+        else:
+            classifier = tree.HoeffdingAdaptiveTreeClassifier(
+                grace_period=self.grace_period,
+                split_criterion="gini",
+                delta=1e-5,
+                tau=0.05,
+                leaf_prediction="nba",
+            )
+            self.model_name = "HoeffdingAdaptiveTreeClassifier"
+
+        self.pipeline = preprocessing.StandardScaler() | classifier
+
+        # Calibration state (held-out validation fold)
+        self.calibrator = None
+        self.is_calibrated = False
+        self.val_fold = []
+        self.calib_fold_size = int(os.environ.get("ARGUS_CALIB_FOLD_SIZE", "50"))
 
         # ADWIN drift monitor on absolute prediction error
         self.drift_detector = drift.ADWIN(delta=self.adwin_delta)
@@ -72,6 +103,37 @@ class OnlineLearner:
         self._load_checkpoint()
 
     # ── Inference ─────────────────────────────────────────────────────────────
+
+    def fit_calibrator(self):
+        """Fit Platt scaling or Isotonic regression on held-out validation fold."""
+        if len(self.val_fold) < 10:
+            return
+
+        targets = [y for _, y in self.val_fold]
+        if len(set(targets)) < 2:
+            return
+
+        probs = [p for p, _ in self.val_fold]
+
+        if self.calibration_mode == "platt":
+            from sklearn.linear_model import LogisticRegression
+
+            def to_logit(p):
+                p_c = max(1e-5, min(1.0 - 1e-5, p))
+                return math.log(p_c / (1.0 - p_c))
+
+            X = np.array([[to_logit(p)] for p in probs])
+            y = np.array(targets)
+            clf = LogisticRegression(C=1.0, solver="lbfgs")
+            clf.fit(X, y)
+            self.calibrator = clf
+            self.is_calibrated = True
+        elif self.calibration_mode == "isotonic":
+            from sklearn.isotonic import IsotonicRegression
+            iso = IsotonicRegression(out_of_bounds="clip", y_min=0.05, y_max=0.95)
+            iso.fit(probs, targets)
+            self.calibrator = iso
+            self.is_calibrated = True
 
     def predict_proba(self, features: Dict[str, Any]) -> Dict[int, float]:
         """
@@ -95,6 +157,17 @@ class OnlineLearner:
                 p_up = 0.5
                 p_down = 0.5
 
+            if self.is_calibrated and self.calibrator is not None:
+                if self.calibration_mode == "platt":
+                    p_c = max(1e-5, min(1.0 - 1e-5, p_up))
+                    logit_p = math.log(p_c / (1.0 - p_c))
+                    cal_p = float(self.calibrator.predict_proba([[logit_p]])[0, 1])
+                    p_up = max(0.0001, min(0.9999, cal_p))
+                elif self.calibration_mode == "isotonic":
+                    cal_p = float(self.calibrator.predict([p_up])[0])
+                    p_up = max(0.0001, min(0.9999, cal_p))
+                p_down = 1.0 - p_up
+
             return {0: round(float(p_down), 4), 1: round(float(p_up), 4)}
 
     def predict_up_probability(self, features: Dict[str, Any]) -> float:
@@ -114,9 +187,10 @@ class OnlineLearner:
         """
         Per-sample incremental update:
         1. Evaluates pre-update prediction error for ADWIN drift detection
-        2. Calls learn_one() on the River pipeline
-        3. Updates running Accuracy and Brier metrics
-        4. Logs drift events to the feature store if detected
+        2. Collects validation fold predictions for calibration if enabled
+        3. Calls learn_one() on the River pipeline
+        4. Updates running Accuracy and Brier metrics
+        5. Logs drift events to the feature store if detected
 
         Returns summary of post-update metrics.
         """
@@ -130,8 +204,25 @@ class OnlineLearner:
             # 1. Pre-update prediction for honest online error tracking
             pre_proba = self.pipeline.predict_proba_one(clean_feats)
             p_up = pre_proba.get(1, 0.5)
-            pred_class = 1 if p_up >= 0.5 else 0
-            error = abs(target - p_up)
+
+            # Collect held-out validation samples for calibration
+            if self.calibration_mode in ("platt", "isotonic") and not self.is_calibrated:
+                self.val_fold.append((p_up, target))
+                if len(self.val_fold) >= self.calib_fold_size:
+                    self.fit_calibrator()
+
+            # If calibrated, compute calibrated probability for metrics
+            eval_p_up = p_up
+            if self.is_calibrated and self.calibrator is not None:
+                if self.calibration_mode == "platt":
+                    p_c = max(1e-5, min(1.0 - 1e-5, p_up))
+                    logit_p = math.log(p_c / (1.0 - p_c))
+                    eval_p_up = float(self.calibrator.predict_proba([[logit_p]])[0, 1])
+                elif self.calibration_mode == "isotonic":
+                    eval_p_up = float(self.calibrator.predict([p_up])[0])
+
+            pred_class = 1 if eval_p_up >= 0.5 else 0
+            error = abs(target - eval_p_up)
 
             # 2. Update model
             self.pipeline.learn_one(clean_feats, target)
@@ -139,7 +230,7 @@ class OnlineLearner:
 
             # 3. Update evaluation metrics
             self.accuracy_metric.update(target, pred_class)
-            self.brier_metric.update(target, p_up)
+            self.brier_metric.update(target, eval_p_up)
 
             # 4. Update ADWIN concept drift detector
             val_before = self.drift_detector.estimation
@@ -190,6 +281,8 @@ class OnlineLearner:
                 "samples_seen": self.samples_seen,
                 "drift_count": self.drift_count,
                 "last_drift_timestamp": self.last_drift_timestamp,
+                "calibrator": self.calibrator,
+                "is_calibrated": self.is_calibrated,
             }
             with open(self.model_path, "wb") as f:
                 pickle.dump(state, f)
@@ -209,18 +302,22 @@ class OnlineLearner:
                     self.samples_seen = state.get("samples_seen", 0)
                     self.drift_count = state.get("drift_count", 0)
                     self.last_drift_timestamp = state.get("last_drift_timestamp", None)
+                    self.calibrator = state.get("calibrator", self.calibrator)
+                    self.is_calibrated = state.get("is_calibrated", self.is_calibrated)
             except Exception:
                 pass
 
     def get_status(self) -> Dict[str, Any]:
         """Return diagnostic health and performance telemetry."""
         with self._lock:
+            calib_suffix = f" + {self.calibration_mode.capitalize()} Calibration" if self.is_calibrated else ""
             return {
-                "model_type": "River ARFClassifier (Adaptive Random Forest) + StandardScaler",
+                "model_type": f"River {self.model_name} + StandardScaler{calib_suffix}",
                 "samples_seen": self.samples_seen,
                 "accuracy": round(float(self.accuracy_metric.get()), 4) if self.samples_seen > 0 else 0.5,
                 "brier_score": round(float(self.brier_metric.get()), 4) if self.samples_seen > 0 else 0.25,
                 "drift_count": self.drift_count,
                 "last_drift_timestamp": self.last_drift_timestamp,
                 "checkpoint_path": self.model_path,
+                "is_calibrated": self.is_calibrated,
             }
